@@ -82,8 +82,6 @@ class VectorStore:
             logger.info("ChromaDB 概念集合 endgame_concepts 初始化成功")
         except Exception as e:
             logger.error(f"概念集合初始化失败: {e}")
-            raise
-            # 打印更详细的错误信息，包括异常类型和栈跟踪
             import traceback
             logger.error(f"异常详情: {traceback.format_exc()}")
             raise

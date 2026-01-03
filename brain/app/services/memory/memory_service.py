@@ -184,13 +184,13 @@ class MemoryService:
                     for entity in neural_result.get('entities', []):
                         if not entity.strip():  # 跳过空实体
                             continue
-                            
+                        
                         # 为每个实体生成向量用于实体对齐
                         entity_vector = self.neural_processor.embed_text(entity)
                         if not entity_vector:  # 如果向量化失败，跳过该实体
                             logger.warning(f"实体向量化失败: {entity}")
                             continue
-                            
+                        
                         # 使用实体对齐逻辑获取或创建规范概念
                         canonical_concept_id, is_new = self._get_or_create_canonical_concept(entity, entity_vector)
                         
@@ -403,22 +403,33 @@ class MemoryService:
                     'error': '添加日志节点失败'
                 }
             
-            # 添加概念节点和提及关系
+            # 添加概念节点和提及关系（使用实体对齐）
             for entity in neural_result.get('entities', []):
-                concept_id = f"concept_{entity}_{hash(text)}"
+                if not entity.strip():  # 跳过空实体
+                    continue
+                    
+                # 为每个实体生成向量用于实体对齐
+                entity_vector = self.neural_processor.embed_text(entity)
+                if not entity_vector:  # 如果向量化失败，跳过该实体
+                    logger.warning(f"实体向量化失败: {entity}")
+                    continue
+                    
+                # 使用实体对齐逻辑获取或创建规范概念
+                canonical_concept_id, is_new = self._get_or_create_canonical_concept(entity, entity_vector)
+                
                 if self.graph_store.add_concept(
-                    concept_id=concept_id,
+                    concept_id=canonical_concept_id,
                     name=entity,
-                    vector=neural_result.get('embedding', [])
+                    vector=entity_vector
                 ):
                     # 建立日志-概念关系
                     if not self.graph_store.add_mentions_relation(
                         log_id=log_id,
-                        concept_id=concept_id
+                        concept_id=canonical_concept_id
                     ):
-                        logger.error(f"添加提及关系失败: {log_id} -> {concept_id}")
+                        logger.error(f"添加提及关系失败: {log_id} -> {canonical_concept_id}")
                 else:
-                    logger.error(f"添加概念节点失败: {concept_id}")
+                    logger.error(f"添加概念节点失败: {canonical_concept_id}")
             
             # 添加三元组关系
             for subject, relation, obj in neural_result.get('triplets', []):
