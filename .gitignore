@@ -33,6 +33,22 @@ body/node_modules/
 body/dist/
 body/.vite/
 
+# Tauri编译输出（非常大！）
+body/src-tauri/target/
+body/src-tauri/Cargo.lock
+
+# 后端构建输出
+brain/dist/
+brain/build/
+
+# 机器学习模型缓存
+*.model
+*.pkl
+*.h5
+*.onnx
+models/
+transformers_cache/
+
 # 环境变量文件
 .env
 .env.local
