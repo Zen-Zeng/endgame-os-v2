@@ -29,10 +29,6 @@ __pycache__/
 # Node.js依赖
 body/node_modules/
 
-# 构建输出
-body/dist/
-body/.vite/
-
 # Tauri编译输出（非常大！）
 body/src-tauri/target/
 body/src-tauri/Cargo.lock
