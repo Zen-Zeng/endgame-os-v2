@@ -2,10 +2,11 @@
 统一记忆服务
 整合向量存储、图数据库和神经处理功能
 """
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import logging
 import json
+import uuid
 from datetime import datetime
 from .vector_store import VectorStore
 from .file_processor import FileProcessor
@@ -46,6 +47,45 @@ class MemoryService:
         )
         self.neural_processor = NeuralProcessor()
         logger.info("记忆服务初始化成功")
+
+    def _get_or_create_canonical_concept(self, entity_name: str, entity_vector: List[float]) -> Tuple[str, bool]:
+        """
+        获取或创建规范概念，实现实体对齐逻辑
+        
+        Args:
+            entity_name: 实体名称
+            entity_vector: 实体向量
+            
+        Returns:
+            Tuple[str, bool]: (canonical_concept_id, 是否是新创建的概念)
+        """
+        try:
+            # 在概念索引中查找相似概念
+            similar_concept = self.vector_store.find_similar_concept(entity_vector, threshold=0.85)
+            
+            if similar_concept:
+                # 找到相似概念，返回已存在的规范概念ID
+                logger.info(f"找到相似概念: {entity_name} -> {similar_concept['name']} (相似度: {1 - similar_concept['distance']:.3f})")
+                return similar_concept['id'], False
+            else:
+                # 创建新概念
+                concept_id = f"concept_{uuid.uuid4().hex[:8]}"
+                success = self.vector_store.add_concept(concept_id, entity_name, entity_vector)
+                
+                if success:
+                    logger.info(f"创建新概念: {entity_name} -> {concept_id}")
+                    return concept_id, True
+                else:
+                    # 如果添加失败，使用备选ID生成策略
+                    concept_id = f"concept_{hash(entity_name)}"
+                    logger.warning(f"使用备选ID: {entity_name} -> {concept_id}")
+                    return concept_id, True
+                    
+        except Exception as e:
+            logger.error(f"获取或创建规范概念失败: {entity_name}, {e}")
+            # 错误情况下返回基于名称的ID
+            concept_id = f"concept_{hash(entity_name)}"
+            return concept_id, True
 
     def ingest_file(self, file_path: str) -> Dict[str, Any]:
         """
@@ -140,22 +180,33 @@ class MemoryService:
                     # 神经处理内容
                     neural_result = self.neural_processor.process_text(content)
                     
-                    # 添加概念节点和提及关系
+                    # 添加概念节点和提及关系（使用实体对齐）
                     for entity in neural_result.get('entities', []):
-                        concept_id = f"concept_{entity}_{processed_count}"
+                        if not entity.strip():  # 跳过空实体
+                            continue
+                            
+                        # 为每个实体生成向量用于实体对齐
+                        entity_vector = self.neural_processor.embed_text(entity)
+                        if not entity_vector:  # 如果向量化失败，跳过该实体
+                            logger.warning(f"实体向量化失败: {entity}")
+                            continue
+                            
+                        # 使用实体对齐逻辑获取或创建规范概念
+                        canonical_concept_id, is_new = self._get_or_create_canonical_concept(entity, entity_vector)
+                        
                         if self.graph_store.add_concept(
-                            concept_id=concept_id,
+                            concept_id=canonical_concept_id,
                             name=entity,
-                            vector=neural_result.get('embedding', [])
+                            vector=entity_vector
                         ):
                             # 建立日志-概念关系
                             if not self.graph_store.add_mentions_relation(
                                 log_id=log_id,
-                                concept_id=concept_id
+                                concept_id=canonical_concept_id
                             ):
-                                logger.error(f"添加提及关系失败: {log_id} -> {concept_id}")
+                                logger.error(f"添加提及关系失败: {log_id} -> {canonical_concept_id}")
                         else:
-                            logger.error(f"添加概念节点失败: {concept_id}")
+                            logger.error(f"添加概念节点失败: {canonical_concept_id}")
                     
                     # 添加三元组关系
                     for subject, relation, obj in neural_result.get('triplets', []):
@@ -594,15 +645,14 @@ class MemoryService:
             # 清空向量存储
             vector_success = self.vector_store.clear_collection()
             
-            # 清空图数据库（简化实现）
-            # 实际应用中可能需要更复杂的清理逻辑
-            graph_success = True  # 简化实现
+            # 清空图数据库
+            graph_success = self._clear_graph_database()
             
             if vector_success and graph_success:
-                logger.info("记忆已清空")
+                logger.info("记忆已清空，包括向量存储和图数据库")
                 return {
                     'success': True,
-                    'message': '记忆已清空'
+                    'message': '记忆已清空，包括向量存储和图数据库'
                 }
             else:
                 return {
@@ -615,6 +665,29 @@ class MemoryService:
                 'success': False,
                 'error': str(e)
             }
+
+    def _clear_graph_database(self) -> bool:
+        """
+        清空图数据库
+        
+        Returns:
+            bool: 是否清空成功
+        """
+        try:
+            # 删除所有节点表数据（保留表结构）
+            # 使用DETACH DELETE来删除有关系的节点
+            node_tables = ["User", "Goal", "Project", "Task", "Log", "Concept"]
+            for table in node_tables:
+                try:
+                    self.graph_store.conn.execute(f"MATCH (n:{table}) DETACH DELETE n")
+                    logger.info(f"已清空 {table} 节点表")
+                except Exception as e:
+                    logger.warning(f"清空 {table} 节点表失败: {e}")
+            
+            return True
+        except Exception as e:
+            logger.error(f"清空图数据库失败: {e}")
+            return False
 
     def delete_by_file(self, file_path: str) -> Dict[str, Any]:
         """

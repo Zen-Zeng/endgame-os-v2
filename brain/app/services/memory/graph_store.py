@@ -318,7 +318,9 @@ class GraphStore:
         try:
             query = f"MATCH (l:Log) WHERE l.timestamp >= TIMESTAMP('{start_time}') AND l.timestamp <= TIMESTAMP('{end_time}') RETURN l ORDER BY l.timestamp DESC"
             result = self.conn.execute(query)
-            return result.get_as_arrow().to_pylist()
+            if result:
+                return result.get_as_arrow().to_pylist()
+            return []
         except Exception as e:
             logger.error(f"时间范围查询失败: {e}")
             return []
@@ -336,7 +338,9 @@ class GraphStore:
         try:
             query = f"MATCH (l:Log {{id: '{log_id}'}})-[:MENTIONS]->(c:Concept) RETURN c"
             result = self.conn.execute(query)
-            return result.get_as_arrow().to_pylist()
+            if result:
+                return result.get_as_arrow().to_pylist()
+            return []
         except Exception as e:
             logger.error(f"查询相关概念失败: {e}")
             return []
@@ -405,6 +409,139 @@ class GraphStore:
             return result.get_as_arrow().to_pylist()
         except Exception as e:
             logger.error(f"按概念查询失败: {e}")
+            return []
+
+    def deep_graph_inference(self, concept_name: str, max_depth: int = 3) -> List[Dict[str, Any]]:
+        """
+        深度图谱推理查询，支持多跳关系查询
+        
+        Args:
+            concept_name: 起始概念名称
+            max_depth: 最大查询深度
+            
+        Returns:
+            List[Dict[str, Any]]: 推理结果列表
+        """
+        try:
+            results = []
+            
+            # 第一层：直接提及该概念的日志
+            direct_query = f"""
+            MATCH (c:Concept {{name: '{concept_name}'}})<-[:MENTIONS]-(l:Log)
+            RETURN l.content, l.timestamp, '{concept_name}' as source_concept, 'direct_mention' as relation_type
+            ORDER BY l.timestamp DESC
+            LIMIT 20
+            """
+            direct_result = self.conn.execute(direct_query)
+            if direct_result:
+                result_list = direct_result.get_as_arrow().to_pylist()
+                for row in result_list:
+                    results.append({
+                        "content": row.get("l.content", ""),
+                        "timestamp": str(row.get("l.timestamp", "")),
+                        "related_concept": row.get("source_concept", ""),
+                        "relation_type": row.get("relation_type", ""),
+                        "type": "deep_graph_inference"
+                    })
+            
+            # 第二层：通过项目间接关联的日志
+            if max_depth >= 2:
+                project_query = f"""
+                MATCH (c:Concept {{name: '{concept_name}'}})<-[:MENTIONS]-(l:Log)-[:CONTRIBUTES_TO]->(p:Project)
+                OPTIONAL MATCH (other_log:Log)-[:CONTRIBUTES_TO]->(p)
+                WHERE other_log.id <> l.id
+                RETURN DISTINCT other_log.content, other_log.timestamp, p.name as project_name, 'project_related' as relation_type
+                ORDER BY other_log.timestamp DESC
+                LIMIT 15
+                """
+                project_result = self.conn.execute(project_query)
+                if project_result:
+                    result_list = project_result.get_as_arrow().to_pylist()
+                    for row in result_list:
+                        results.append({
+                            "content": row.get("other_log.content", ""),
+                            "timestamp": str(row.get("other_log.timestamp", "")),
+                            "related_project": row.get("project_name", ""),
+                            "relation_type": row.get("relation_type", ""),
+                            "type": "deep_graph_inference"
+                        })
+            
+            # 第三层：通过目标关联的更深层关系
+            if max_depth >= 3:
+                goal_query = f"""
+                MATCH (c:Concept {{name: '{concept_name}'}})<-[:MENTIONS]-(l:Log)-[:CONTRIBUTES_TO]->(p:Project)-[:BELONGS_TO]->(g:Goal)
+                OPTIONAL MATCH (other_project:Project)-[:BELONGS_TO]->(g)
+                WHERE other_project.id <> p.id
+                RETURN DISTINCT other_project.name, g.title as goal_title, 'goal_related' as relation_type
+                LIMIT 10
+                """
+                goal_result = self.conn.execute(goal_query)
+                if goal_result:
+                    result_list = goal_result.get_as_arrow().to_pylist()
+                    for row in result_list:
+                        results.append({
+                            "content": f"相关项目: {row.get('other_project.name', '')}",
+                            "related_goal": row.get('goal_title', ''),
+                            "relation_type": row.get('relation_type', ''),
+                            "type": "deep_graph_inference"
+                        })
+            
+            logger.info(f"深度图谱推理完成，概念: {concept_name}, 深度: {max_depth}, 结果: {len(results)}")
+            return results
+            
+        except Exception as e:
+            logger.error(f"深度图谱推理失败: {e}")
+            return []
+
+    def find_concept_connections(self, concept_names: List[str], min_confidence: float = 0.7) -> List[Dict[str, Any]]:
+        """
+        查找多个概念之间的关联关系
+        
+        Args:
+            concept_names: 概念名称列表
+            min_confidence: 最小置信度阈值
+            
+        Returns:
+            List[Dict[str, Any]]: 关联关系列表
+        """
+        try:
+            connections = []
+            
+            # 构建概念列表字符串
+            concept_list = "', '".join(concept_names)
+            concept_list = f"'{concept_list}'"
+            
+            # 查询共同出现的日志
+            common_logs_query = f"""
+            MATCH (c1:Concept)<-[:MENTIONS]-(l:Log)-[:MENTIONS]->(c2:Concept)
+            WHERE c1.name IN [{concept_list}] AND c2.name IN [{concept_list}] AND c1.name <> c2.name
+            RETURN c1.name, c2.name, l.content, l.timestamp, count(l) as co_occurrence_count
+            ORDER BY co_occurrence_count DESC
+            LIMIT 20
+            """
+            result = self.conn.execute(common_logs_query)
+            
+            if result:
+                result_list = result.get_as_arrow().to_pylist()
+                for row in result_list:
+                    co_occurrence = row.get('co_occurrence_count', 0)
+                    confidence = min(1.0, co_occurrence / 10.0)  # 简单置信度计算
+                    if confidence >= min_confidence:
+                        connections.append({
+                            "concept1": row.get('c1.name', ''),
+                            "concept2": row.get('c2.name', ''),
+                            "shared_content": row.get('l.content', ''),
+                            "timestamp": str(row.get('l.timestamp', '')),
+                            "co_occurrence_count": co_occurrence,
+                            "confidence": confidence,
+                            "type": "concept_connection"
+                        })
+            
+            logger.info(f"概念关联查询完成，找到 {len(connections)} 个关联")
+            return connections
+            
+        except Exception as e:
+            logger.error(f"概念关联查询失败: {e}")
             return []
 
     def close(self):

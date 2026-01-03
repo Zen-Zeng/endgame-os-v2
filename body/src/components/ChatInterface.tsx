@@ -6,7 +6,7 @@ import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Send, Loader2, RefreshCw, Upload, Database, Trash2, FileText } from 'lucide-react';
 import { clsx } from 'clsx';
-import { useChatStore, type Message } from '../stores/useChatStore';
+import { useChatStore } from '../stores/useChatStore';
 import { useH3Store } from '../stores/useH3Store';
 
 interface MemoryStats {
@@ -45,7 +45,7 @@ export default function ChatInterface() {
 
   const fetchMemoryStats = async () => {
     try {
-      const response = await fetch('http://127.0.0.1:8002/api/memory/stats');
+      const response = await fetch('/api/memory/stats');
       if (response.ok) {
         const stats = await response.json();
         setMemoryStats(stats);
@@ -73,7 +73,7 @@ export default function ChatInterface() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 120000);
 
-      const response = await fetch('http://127.0.0.1:8002/api/chat', {
+      const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -142,7 +142,7 @@ export default function ChatInterface() {
     
     setTimeout(async () => {
       try {
-        const response = await fetch('http://127.0.0.1:8002/health');
+        const response = await fetch('/api/health');
         if (response.ok) {
           setIsConnected(true);
           // 这里不再删除最后一条消息，而是直接提示成功
@@ -198,7 +198,7 @@ export default function ChatInterface() {
         const formData = new FormData();
         formData.append('file', file);
 
-        const response = await fetch('http://127.0.0.1:8002/api/upload', {
+        const response = await fetch('/api/upload', {
           method: 'POST',
           body: formData,
         });
@@ -210,7 +210,7 @@ export default function ChatInterface() {
       }
 
       if (filePaths.length > 0) {
-        const trainResponse = await fetch('http://127.0.0.1:8002/api/train', {
+        const trainResponse = await fetch('/api/train', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -245,7 +245,7 @@ export default function ChatInterface() {
     if (!confirm('确定要清空所有记忆吗？此操作不可恢复。')) return;
 
     try {
-      const response = await fetch('http://127.0.0.1:8002/api/memory/clear', {
+      const response = await fetch('/api/memory/clear', {
         method: 'DELETE',
       });
 

@@ -89,9 +89,30 @@ async def root():
     """
     根路径健康检查接口
     """
-    return {"status": "ok", "message": "Endgame OS Brain API is running"}
+    return {
+        "message": "Endgame OS Brain API",
+        "status": "running",
+        "version": "0.1.0",
+        "endpoints": {
+            "health": "/api/health",
+            "chat": "/api/chat",
+            "memory": "/api/memory/stats",
+            "h3": "/api/h3/history"
+        }
+    }
 
-@app.get("/health")
+@app.get("/api")
+async def api_info():
+    """
+    API 信息接口
+    """
+    return {
+        "message": "Endgame OS Brain API",
+        "status": "running",
+        "version": "0.1.0"
+    }
+
+@app.get("/api/health")
 async def health_check():
     """
     健康检查接口

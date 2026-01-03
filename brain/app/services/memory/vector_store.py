@@ -4,9 +4,10 @@ ChromaDB 向量存储封装
 """
 import chromadb
 from chromadb.config import Settings
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import logging
+import hashlib
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +29,9 @@ class VectorStore:
         self.persist_directory = persist_directory
         self.client = None
         self.collection = None
+        self.concept_collection = None
         self._initialize_client()
+        self._init_concept_collection()
 
     def _initialize_client(self):
         """
@@ -63,6 +66,23 @@ class VectorStore:
             logger.info(f"ChromaDB 初始化完成，存储路径: {self.persist_directory}")
         except Exception as e:
             logger.error(f"ChromaDB 初始化失败: {e}")
+            import traceback
+            logger.error(f"异常详情: {traceback.format_exc()}")
+            raise
+    
+    def _init_concept_collection(self):
+        """
+        初始化概念集合，用于实体对齐
+        """
+        try:
+            self.concept_collection = self.client.get_or_create_collection(
+                name="endgame_concepts",
+                metadata={"description": "Endgame OS 实体概念库 - 用于实体对齐"}
+            )
+            logger.info("ChromaDB 概念集合 endgame_concepts 初始化成功")
+        except Exception as e:
+            logger.error(f"概念集合初始化失败: {e}")
+            raise
             # 打印更详细的错误信息，包括异常类型和栈跟踪
             import traceback
             logger.error(f"异常详情: {traceback.format_exc()}")
@@ -221,3 +241,86 @@ class VectorStore:
         except Exception as e:
             logger.error(f"删除文档失败: {e}")
             return False
+    
+    def find_similar_concept(self, vector: List[float], threshold: float = 0.85) -> Optional[Dict[str, Any]]:
+        """
+        查找是否存在相似概念，用于实体合并
+        
+        Args:
+            vector: 概念向量
+            threshold: 相似度阈值 (0-1，1为完全相同)
+            
+        Returns:
+            Optional[Dict[str, Any]]: 相似概念信息，如果未找到返回None
+        """
+        try:
+            results = self.concept_collection.query(
+                query_embeddings=[vector],
+                n_results=1
+            )
+            
+            if results['ids'] and results['ids'][0]:
+                distance = results['distances'][0][0]
+                # ChromaDB的distance通常是L2或Cosine distance
+                # 这里假设是cosine distance，distance越小越相似
+                # Cosine distance范围通常是0-2，0为完全相同
+                if distance < (1 - threshold): 
+                    return {
+                        'id': results['ids'][0][0],
+                        'name': results['metadatas'][0][0]['name'],
+                        'distance': distance
+                    }
+            return None
+        except Exception as e:
+            logger.error(f"查找相似概念失败: {e}")
+            return None
+    
+    def add_concept(self, concept_id: str, name: str, vector: List[float]) -> bool:
+        """
+        注册新概念到概念索引
+        
+        Args:
+            concept_id: 概念ID
+            name: 概念名称
+            vector: 概念向量
+            
+        Returns:
+            bool: 是否添加成功
+        """
+        try:
+            self.concept_collection.add(
+                ids=[concept_id],
+                embeddings=[vector],
+                metadatas=[{"name": name}]
+            )
+            logger.info(f"成功注册概念: {concept_id} - {name}")
+            return True
+        except Exception as e:
+            logger.error(f"注册新概念失败: {e}")
+            return False
+    
+    def get_concept_by_id(self, concept_id: str) -> Optional[Dict[str, Any]]:
+        """
+        根据ID获取概念信息
+        
+        Args:
+            concept_id: 概念ID
+            
+        Returns:
+            Optional[Dict[str, Any]]: 概念信息，如果未找到返回None
+        """
+        try:
+            result = self.concept_collection.get(
+                ids=[concept_id],
+                include=['metadatas']
+            )
+            
+            if result['ids'] and result['ids'][0]:
+                return {
+                    'id': result['ids'][0],
+                    'name': result['metadatas'][0]['name']
+                }
+            return None
+        except Exception as e:
+            logger.error(f"获取概念信息失败: {e}")
+            return None
