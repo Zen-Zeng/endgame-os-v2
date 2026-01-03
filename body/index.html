@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" class="light">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Endgame OS</title>
+    <style>
+      /* 强制浅色主题，优先级最高 */
+      :root {
+        color-scheme: light !important;
+      }
+      html, body {
+        background-color: #f0f9ff !important;
+        color: #1f2937 !important;
+      }
+      /* 覆盖任何可能的深色主题样式 */
+      * {
+        color-scheme: light !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,35 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "network-access",
+  "description": "allows network access to localhost:8000",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-unminimize",
+    "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-title",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-center",
+    "core:window:allow-request-user-attention",
+    "core:window:allow-set-resizable",
+    "core:window:allow-set-decorations",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-icon",
+    "core:window:allow-set-theme",
+    "core:window:allow-set-cursor-position",
+    "core:window:allow-set-cursor-grab",
+    "core:window:allow-set-cursor-visible",
+    "core:window:allow-set-cursor-icon"
+  ]
+}
