@@ -1,15 +1,9 @@
 fastapi
 uvicorn
-langgraph
+python-dotenv
 langchain
 langchain-google-genai
-kuzu
 chromadb
-pydantic-settings
-python-dotenv
-pypdf
-python-multipart
-langchain-community
-transformers
-torch
 sentence-transformers
+# 移除 kuzu
+# numpy, torch 等通常由 sentence-transformers 自动安装
