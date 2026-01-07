@@ -209,37 +209,85 @@ class FileProcessor:
             
             conversations = []
             
-            # 处理 ChatGPT 格式
-            if 'mapping' in data:
-                for conv_id, conv_data in data['mapping'].items():
-                    if 'message' in conv_data:
-                        message = conv_data['message']
-                        content = ""
-                        
-                        # 提取消息内容
-                        if 'content' in message:
-                            if isinstance(message['content'], list):
-                                content = " ".join([part.get('text', '') for part in message['content']])
-                            else:
-                                content = message['content'].get('text', '')
-                        
-                        # 获取时间戳
-                        create_time = message.get('create_time', '')
-                        if create_time:
-                            # 转换为标准格式
-                            try:
-                                if isinstance(create_time, (int, float)):
-                                    create_time = datetime.fromtimestamp(create_time).strftime('%Y-%m-%d %H:%M:%S')
+            # 处理 ChatGPT 导出格式（数组形式）
+            if isinstance(data, list):
+                for conv_data in data:
+                    if 'mapping' in conv_data:
+                        for conv_id, conv_item in conv_data['mapping'].items():
+                            if 'message' in conv_item and conv_item['message']:
+                                message = conv_item['message']
+                                content = ""
+                                
+                                # 提取消息内容
+                                if 'content' in message:
+                                    message_content = message['content']
+                                    
+                                    # 处理 parts 数组格式
+                                    if isinstance(message_content, dict) and 'parts' in message_content:
+                                        parts = message_content['parts']
+                                        if isinstance(parts, list):
+                                            # 过滤掉空字符串
+                                            content_parts = [str(part) for part in parts if part and str(part).strip()]
+                                            content = " ".join(content_parts)
+                                    # 处理直接字符串格式
+                                    elif isinstance(message_content, str):
+                                        content = message_content
+                                    # 处理 text 字段
+                                    elif 'text' in message_content:
+                                        content = message_content['text']
+                                
+                                # 获取时间戳
+                                create_time = message.get('create_time', '')
+                                if create_time:
+                                    # 转换为标准格式
+                                    try:
+                                        if isinstance(create_time, (int, float)):
+                                            create_time = datetime.fromtimestamp(create_time).strftime('%Y-%m-%d %H:%M:%S')
+                                        else:
+                                            create_time = str(create_time)
+                                    except:
+                                        create_time = ""
+                                
+                                # 只添加非空内容
+                                if content and content.strip():
+                                    conversations.append({
+                                        'id': conv_id,
+                                        'content': content,
+                                        'create_time': create_time
+                                    })
+            
+            # 处理单对象格式（向后兼容）
+            elif isinstance(data, dict):
+                if 'mapping' in data:
+                    for conv_id, conv_data in data['mapping'].items():
+                        if 'message' in conv_data:
+                            message = conv_data['message']
+                            content = ""
+                            
+                            # 提取消息内容
+                            if 'content' in message:
+                                if isinstance(message['content'], list):
+                                    content = " ".join([part.get('text', '') for part in message['content']])
                                 else:
-                                    create_time = str(create_time)
-                            except:
-                                create_time = ""
-                        
-                        conversations.append({
-                            'id': conv_id,
-                            'content': content,
-                            'create_time': create_time
-                        })
+                                    content = message['content'].get('text', '')
+                            
+                            # 获取时间戳
+                            create_time = message.get('create_time', '')
+                            if create_time:
+                                # 转换为标准格式
+                                try:
+                                    if isinstance(create_time, (int, float)):
+                                        create_time = datetime.fromtimestamp(create_time).strftime('%Y-%m-%d %H:%M:%S')
+                                    else:
+                                        create_time = str(create_time)
+                                except:
+                                    create_time = ""
+                            
+                            conversations.append({
+                                'id': conv_id,
+                                'content': content,
+                                'create_time': create_time
+                            })
             
             # 处理其他格式
             elif 'conversations' in data:
@@ -254,7 +302,7 @@ class FileProcessor:
             logger.info(f"成功提取 {len(conversations)} 条对话记录")
             return conversations
         except Exception as e:
-            logger.error(f"提取对话记录失败: {e}")
+            logger.error(f"提取对话记录失败: {e}", exc_info=True)
             return []
 
     def _chunk_text(self, text: str) -> List[str]:
@@ -283,29 +331,39 @@ class FileProcessor:
             
             if end >= total_length:
                 chunks.append(text[start:])
-                processed += len(text[start:])
                 break
             
             chunk = text[start:end]
             
-            if end < total_length:
-                last_newline = chunk.rfind('\n')
-                last_period = chunk.rfind('.')
-                last_space = chunk.rfind(' ')
-                
-                best_break = max(last_newline, last_period, last_space)
-                
-                if best_break > 0:
-                    end = start + best_break + 1
+            # 尝试在换行符或句号处断开
+            last_newline = chunk.rfind('\n')
+            last_period = chunk.rfind('.')
+            
+            # 只有当断开位置能让 start 至少前进 1 个字符时才使用
+            # 公式：new_start = end - overlap, 要求 new_start > start => end > start + overlap
+            min_end = start + self.chunk_overlap + 1
+            best_break = max(last_newline, last_period)
+            
+            if best_break > 0:
+                adjusted_end = start + best_break + 1
+                # 确保调整后的 end 足够大，不会导致 start 倒退
+                if adjusted_end > min_end:
+                    end = adjusted_end
                     chunk = text[start:end]
             
             chunks.append(chunk)
-            start = end - self.chunk_overlap if end > self.chunk_overlap else end
+            
+            # 确保下一次开始位置严格大于当前开始位置
+            next_start = end - self.chunk_overlap
+            if next_start <= start:
+                start = start + (self.chunk_size - self.chunk_overlap)
+            else:
+                start = next_start
             
             # 每处理10%的文本记录一次日志
             new_processed = int(start / total_length * 100)
-            if new_processed > processed + 10:
-                logger.info(f"分块进度: {new_processed}%")
+            if new_processed >= processed + 10:
+                logger.info(f"分块进度: {min(new_processed, 100)}%")
                 processed = new_processed
         
         # 过滤掉空块

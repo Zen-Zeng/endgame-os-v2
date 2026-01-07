@@ -11,6 +11,13 @@ import os
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
+
+# 显式取消代理设置，确保 Gemini API 直连
+import os
+for var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+    if var in os.environ:
+        del os.environ[var]
+
 from app.services.memory.memory_service import MemoryService
 from app.core.config import SYSTEM_PROMPT_TEMPLATE, ENDGAME_VISION
 
@@ -44,11 +51,11 @@ def retrieve_memory_node(state: AgentState) -> AgentState:
     logger.info(f"正在检索记忆: {last_message[:50]}...")
     
     # 检索语义记忆
-    memories = memory_service.query_memory(last_message, n_results=3)
+    memories = memory_service.vector_store.similarity_search(last_message, n_results=3)
     
     context = state.get("context", "")
     if memories:
-        memory_text = "\n相关历史记忆：\n" + "\n".join([m['content'] for m in memories])
+        memory_text = "\n相关历史记忆：\n" + "\n".join([m.get('content', '') for m in memories])
         context += memory_text
     
     return {
@@ -61,11 +68,59 @@ def check_alignment_node(state: AgentState) -> AgentState:
     目标对齐检查节点
     判断用户意图是否偏离终局愿景
     """
-    # 简单实现：目前仅作为占位，未来可引入 LLM 进行语义对齐分析
-    return {
-        "alignment_score": 0.85,
-        "next_step": "architect"
-    }
+    last_message = state["messages"][-1].content
+    logger.info(f"正在进行目标对齐检查: {last_message[:50]}...")
+    
+    # 构建对齐检查的提示词
+    alignment_prompt = f"""
+    作为用户的“数字分身”，请评估以下用户输入是否与其“5年终局愿景”对齐。
+    
+    终局愿景：
+    {ENDGAME_VISION}
+    
+    用户输入：
+    {last_message}
+    
+    请输出一个 0 到 1 之间的对齐分数（Score），并给出简短的理由（Reason）。
+    格式要求：
+    Score: [分数]
+    Reason: [原因]
+    """
+    
+    try:
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+        response = llm.invoke([HumanMessage(content=alignment_prompt)])
+        content = response.content
+        
+        # 简单解析输出
+        score = 0.5
+        reason = "无法确定对齐度"
+        
+        for line in content.split("\n"):
+            if line.startswith("Score:"):
+                try:
+                    score = float(line.split(":")[1].strip())
+                except: pass
+            elif line.startswith("Reason:"):
+                reason = line.split(":")[1].strip()
+        
+        logger.info(f"对齐检查完成: 分数={score}, 理由={reason}")
+        
+        # 将理由注入上下文，供后续 architect 节点使用
+        context = state.get("context", "")
+        context += f"\n[目标对齐分析]\n对齐得分: {score}\n分析理由: {reason}\n"
+        
+        return {
+            "alignment_score": score,
+            "context": context,
+            "next_step": "architect"
+        }
+    except Exception as e:
+        logger.error(f"对齐检查失败: {e}")
+        return {
+            "alignment_score": 0.5,
+            "next_step": "architect"
+        }
 
 def architect_node(state: AgentState) -> AgentState:
     """
@@ -99,9 +154,9 @@ def architect_node(state: AgentState) -> AgentState:
         "next_step": "end"
     }
 
-def create_graph() -> StateGraph:
+def create_endgame_graph():
     """
-    创建 LangGraph 工作流
+    创建并编译 LangGraph 工作流
     """
     workflow = StateGraph(AgentState)
 
@@ -115,5 +170,3 @@ def create_graph() -> StateGraph:
     workflow.add_edge("architect", END)
 
     return workflow.compile()
-
-graph = create_graph()

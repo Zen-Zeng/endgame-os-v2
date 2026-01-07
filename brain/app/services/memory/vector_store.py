@@ -86,6 +86,28 @@ class VectorStore:
             logger.error(f"异常详情: {traceback.format_exc()}")
             raise
 
+    def clear_all_data(self):
+        """清除所有向量数据"""
+        try:
+            logger.info("开始清空向量数据库...")
+            # 删除并重新创建集合比逐条删除更高效
+            self.client.delete_collection("endgame_memory")
+            self.client.delete_collection("endgame_concepts")
+            
+            # 重新初始化
+            self.collection = self.client.get_or_create_collection(
+                name="endgame_memory",
+                metadata={"description": "Endgame OS 长期记忆"}
+            )
+            self.concept_collection = self.client.get_or_create_collection(
+                name="endgame_concepts",
+                metadata={"description": "Endgame OS 实体概念库 - 用于实体对齐"}
+            )
+            logger.info("向量数据库已清空")
+        except Exception as e:
+            logger.error(f"清空向量数据库失败: {e}")
+            raise e
+
     def add_documents(
         self,
         documents: List[str],

@@ -42,8 +42,8 @@ SYSTEM_PROMPT_TEMPLATE = """
 
 # Uvicorn 配置
 UVICORN_CONFIG = {
-    "host": "0.0.0.0",
-    "port": 8080,
+    "host": "127.0.0.1",
+    "port": 8888,
     "log_level": "info",
     "reload": True
 }

@@ -8,6 +8,13 @@ import importlib
 # 添加当前目录到Python路径
 sys.path.append('/Users/andornot/endgame-os-v2/brain')
 
+# 显式取消代理设置，确保所有 API 请求（尤其是 Gemini）直连
+import os
+for var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+    if var in os.environ:
+        del os.environ[var]
+        print(f"✅ 已取消环境变量 {var}")
+
 # 应用importlib.metadata的猴子补丁
 try:
     import importlib.metadata

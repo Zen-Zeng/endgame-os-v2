@@ -9,9 +9,9 @@ export default defineConfig({
     open: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: 'http://127.0.0.1:8888',
         changeOrigin: true,
-        rewrite: (path) => path,
+        // 不再在代理层添加 /v1，由前端代码或后端路由统一处理
       },
     },
   },

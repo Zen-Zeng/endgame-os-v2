@@ -8,10 +8,11 @@ import logging
 import json
 import uuid
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .vector_store import VectorStore
 from .file_processor import FileProcessor
 from .graph_store import GraphStore
-from ..neural.processor import NeuralProcessor
+from ..neural.processor import NeuralProcessor, create_processor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,8 +46,20 @@ class MemoryService:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap
         )
-        self.neural_processor = NeuralProcessor()
-        logger.info("记忆服务初始化成功")
+        # 启用真实神经处理，由于 NeuralProcessor 已改为延迟加载，这里不会阻塞启动
+        self.neural_processor = create_processor(offline_mode=False)
+        logger.info("记忆服务初始化成功（神经处理器已就绪，将在首次使用时加载模型）")
+
+    def clear_all_memories(self):
+        """清除所有记忆数据（向量存储和图谱存储）"""
+        try:
+            logger.info("开始全面清理记忆数据...")
+            self.vector_store.clear_all_data()
+            self.graph_store.clear_all_data()
+            logger.info("记忆数据清理完成")
+        except Exception as e:
+            logger.error(f"清理记忆数据失败: {e}")
+            raise e
 
     def _get_or_create_canonical_concept(self, entity_name: str, entity_vector: List[float]) -> Tuple[str, bool]:
         """
@@ -122,8 +135,8 @@ class MemoryService:
             # 获取文件元数据
             metadata = self.file_processor.get_file_metadata(file_path)
             
-            # 如果是对话记录文件，进行特殊处理
-            if path.suffix.lower() == '.json' and 'conversation' in path.name.lower():
+            # 如果是 JSON 文件，尝试作为对话记录进行处理
+            if path.suffix.lower() == '.json':
                 return self._ingest_conversation_file(file_path, chunks, metadata)
             
             # 处理普通文件
@@ -137,620 +150,195 @@ class MemoryService:
                 'file_path': file_path
             }
 
-    def _ingest_conversation_file(self, file_path: str, chunks: List[str], metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        处理对话记录文件，构建时间轴记忆图谱
-
-        Args:
-            file_path: 文件路径
-            chunks: 文本块
-            metadata: 文件元数据
-
-        Returns:
-            Dict[str, Any]: 处理结果
-        """
-        try:
-            logger.info(f"开始处理对话文件: {file_path}")
-            
-            # 提取对话记录
-            conversations = self.file_processor.extract_conversations_with_time(file_path)
-            
-            # 处理每条对话记录
-            processed_count = 0
-            for conv in conversations:
-                try:
-                    # 创建日志节点（核心时间节点）
-                    log_id = f"conv_{processed_count}_{hash(conv.get('content', ''))}"
-                    content = conv.get('content', '')
-                    timestamp = conv.get('create_time', '')
-                    
-                    if not content:
-                        continue
-                    
-                    # 添加日志节点
-                    if not self.graph_store.add_log(
-                        log_id=log_id,
-                        content=content,
-                        timestamp=timestamp,
-                        log_type="conversation"
-                    ):
-                        logger.error(f"添加日志节点失败: {log_id}")
-                        continue
-                    
-                    # 神经处理内容
-                    neural_result = self.neural_processor.process_text(content)
-                    
-                    # 添加概念节点和提及关系（使用实体对齐）
-                    for entity in neural_result.get('entities', []):
-                        if not entity.strip():  # 跳过空实体
-                            continue
-                        
-                        # 为每个实体生成向量用于实体对齐
-                        entity_vector = self.neural_processor.embed_text(entity)
-                        if not entity_vector:  # 如果向量化失败，跳过该实体
-                            logger.warning(f"实体向量化失败: {entity}")
-                            continue
-                        
-                        # 使用实体对齐逻辑获取或创建规范概念
-                        canonical_concept_id, is_new = self._get_or_create_canonical_concept(entity, entity_vector)
-                        
-                        if self.graph_store.add_concept(
-                            concept_id=canonical_concept_id,
-                            name=entity,
-                            vector=entity_vector
-                        ):
-                            # 建立日志-概念关系
-                            if not self.graph_store.add_mentions_relation(
-                                log_id=log_id,
-                                concept_id=canonical_concept_id
-                            ):
-                                logger.error(f"添加提及关系失败: {log_id} -> {canonical_concept_id}")
-                        else:
-                            logger.error(f"添加概念节点失败: {canonical_concept_id}")
-                    
-                    # 添加三元组关系
-                    for subject, relation, obj in neural_result.get('triplets', []):
-                        # 根据关系类型创建不同的节点和关系
-                        if relation in ["完成", "贡献于"]:
-                            # 创建项目节点
-                            project_id = f"project_{obj}_{processed_count}"
-                            if self.graph_store.add_project(
-                                project_id=project_id,
-                                name=obj
-                            ):
-                                # 建立日志-项目关系
-                                if not self.graph_store.add_contributes_to_relation(
-                                    log_id=log_id,
-                                    project_id=project_id
-                                ):
-                                    logger.error(f"添加贡献关系失败: {log_id} -> {project_id}")
-                            else:
-                                logger.error(f"添加项目节点失败: {project_id}")
-                    
-                        elif relation in ["属于", "关于"]:
-                            # 创建目标节点
-                            goal_id = f"goal_{obj}_{processed_count}"
-                            if self.graph_store.add_goal(
-                                goal_id=goal_id,
-                                title=obj
-                            ):
-                                # 建立项目-目标关系
-                                project_id = f"project_{subject}_{processed_count}"
-                                if self.graph_store.add_project(
-                                    project_id=project_id,
-                                    name=subject
-                                ):
-                                    if not self.graph_store.add_belongs_to_relation(
-                                        project_id=project_id,
-                                        goal_id=goal_id
-                                    ):
-                                        logger.error(f"添加属于关系失败: {project_id} -> {goal_id}")
-                                else:
-                                    logger.error(f"添加项目节点失败: {project_id}")
-                            else:
-                                logger.error(f"添加目标节点失败: {goal_id}")
-                
-                    processed_count += 1
-                
-                except Exception as e:
-                    logger.error(f"处理对话记录失败: {e}")
-                    continue
-            
-            # 同时向向量存储添加内容（用于模糊检索）
-            path = Path(file_path)
-            metadatas = [metadata for _ in chunks]
-            ids = [f"{path.stem}_{i}" for i in range(len(chunks))]
-
-            vector_success = self.vector_store.add_documents(
-                documents=chunks,
-                metadatas=metadatas,
-                ids=ids
-            )
-
-            if vector_success:
-                logger.info(f"对话文件处理成功: {file_path}, 处理 {processed_count} 条记录")
-                return {
-                    'success': True,
-                    'file_path': file_path,
-                    'conversations_processed': processed_count,
-                    'chunks_added': len(chunks),
-                    'metadata': metadata
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': '添加到向量存储失败',
-                    'file_path': file_path
-                }
-
-        except Exception as e:
-            logger.error(f"处理对话文件失败 {file_path}: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'file_path': file_path
-            }
-
     def _ingest_regular_file(self, file_path: str, chunks: List[str], metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
-        处理普通文件
-
-        Args:
-            file_path: 文件路径
-            chunks: 文本块
-            metadata: 文件元数据
-
-        Returns:
-            Dict[str, Any]: 处理结果
+        处理普通文本文件的逻辑，使用并行神经提取和批量图谱写入
         """
         try:
-            # 添加到向量存储
-            metadatas = [metadata for _ in chunks]
-            ids = [f"{Path(file_path).stem}_{i}" for i in range(len(chunks))]
-
-            success = self.vector_store.add_documents(
-                documents=chunks,
-                metadatas=metadatas,
-                ids=ids
-            )
-
-            if success:
-                logger.info(f"文件处理成功: {file_path}, 添加 {len(chunks)} 个片段")
-                return {
-                    'success': True,
-                    'file_path': file_path,
-                    'chunks_added': len(chunks),
-                    'metadata': metadata
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': '添加到向量存储失败',
-                    'file_path': file_path
-                }
-
-        except Exception as e:
-            logger.error(f"处理文件失败 {file_path}: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'file_path': file_path
-            }
-
-    def ingest_files(self, file_paths: List[str]) -> Dict[str, Any]:
-        """
-        批量处理文件并添加到记忆
-
-        Args:
-            file_paths: 文件路径列表
-
-        Returns:
-            Dict[str, Any]: 批量处理结果
-        """
-        results = {
-            'total': len(file_paths),
-            'success': 0,
-            'failed': 0,
-            'details': []
-        }
-
-        for file_path in file_paths:
-            result = self.ingest_file(file_path)
-            results['details'].append(result)
+            logger.info(f"开始处理普通文件: {file_path}, 共 {len(chunks)} 个片段")
             
-            if result['success']:
-                results['success'] += 1
-            else:
-                results['failed'] += 1
-
-        logger.info(f"批量处理完成: 成功 {results['success']}, 失败 {results['failed']}")
-        return results
-
-    def ingest_text(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        直接添加文本到记忆
-
-        Args:
-            text: 文本内容
-            metadata: 元数据
-
-        Returns:
-            Dict[str, Any]: 处理结果
-        """
-        try:
-            if not text or not text.strip():
-                return {
-                    'success': False,
-                    'error': '文本内容为空'
-                }
-
-            # 神经处理文本
-            neural_result = self.neural_processor.process_text(text)
+            # 1. 记录日志节点 (作为整个文件的父节点或上下文)
+            file_id = f"file_{uuid.uuid4().hex[:8]}"
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            file_content = f"文件: {Path(file_path).name}\n元数据: {json.dumps(metadata, ensure_ascii=False)}"
             
-            # 创建日志节点
-            log_id = f"text_{hash(text)}"
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.graph_store.add_log(log_id=file_id, content=file_content, timestamp=timestamp, log_type="file_upload")
             
-            if not self.graph_store.add_log(
-                log_id=log_id,
-                content=text,
-                timestamp=timestamp,
-                log_type="manual"
-            ):
-                logger.error(f"添加日志节点失败: {log_id}")
-                return {
-                    'success': False,
-                    'error': '添加日志节点失败'
-                }
+            # 2. 并行处理片段提取实体
+            extracted_entities = []
             
-            # 添加概念节点和提及关系（使用实体对齐）
-            for entity in neural_result.get('entities', []):
-                if not entity.strip():  # 跳过空实体
-                    continue
-                    
-                # 为每个实体生成向量用于实体对齐
-                entity_vector = self.neural_processor.embed_text(entity)
-                if not entity_vector:  # 如果向量化失败，跳过该实体
-                    logger.warning(f"实体向量化失败: {entity}")
-                    continue
-                    
-                # 使用实体对齐逻辑获取或创建规范概念
-                canonical_concept_id, is_new = self._get_or_create_canonical_concept(entity, entity_vector)
-                
-                if self.graph_store.add_concept(
-                    concept_id=canonical_concept_id,
-                    name=entity,
-                    vector=entity_vector
-                ):
-                    # 建立日志-概念关系
-                    if not self.graph_store.add_mentions_relation(
-                        log_id=log_id,
-                        concept_id=canonical_concept_id
-                    ):
-                        logger.error(f"添加提及关系失败: {log_id} -> {canonical_concept_id}")
-                else:
-                    logger.error(f"添加概念节点失败: {canonical_concept_id}")
-            
-            # 添加三元组关系
-            for subject, relation, obj in neural_result.get('triplets', []):
-                # 根据关系类型创建不同的节点和关系
-                if relation in ["完成", "贡献于"]:
-                    # 创建项目节点
-                    project_id = f"project_{obj}_{hash(text)}"
-                    if self.graph_store.add_project(
-                        project_id=project_id,
-                        name=obj
-                    ):
-                        # 建立日志-项目关系
-                        if not self.graph_store.add_contributes_to_relation(
-                            log_id=log_id,
-                            project_id=project_id
-                        ):
-                            logger.error(f"添加贡献关系失败: {log_id} -> {project_id}")
-                    else:
-                        logger.error(f"添加项目节点失败: {project_id}")
-                
-                elif relation in ["属于", "关于"]:
-                    # 创建目标节点
-                    goal_id = f"goal_{obj}_{hash(text)}"
-                    if self.graph_store.add_goal(
-                        goal_id=goal_id,
-                        title=obj
-                    ):
-                        # 建立项目-目标关系
-                        project_id = f"project_{subject}_{hash(text)}"
-                        if self.graph_store.add_project(
-                            project_id=project_id,
-                            name=subject
-                        ):
-                            if not self.graph_store.add_belongs_to_relation(
-                                project_id=project_id,
-                                goal_id=goal_id
-                            ):
-                                logger.error(f"添加属于关系失败: {project_id} -> {goal_id}")
-                        else:
-                            logger.error(f"添加项目节点失败: {project_id}")
-                    else:
-                        logger.error(f"添加目标节点失败: {goal_id}")
-            
-            # 同时向向量存储添加内容（用于模糊检索）
-            chunks = self.file_processor._chunk_text(text)
-            metadatas = [metadata or {} for _ in chunks]
-            ids = [f"text_{i}_{hash(chunk)}" for i, chunk in enumerate(chunks)]
-
-            vector_success = self.vector_store.add_documents(
-                documents=chunks,
-                metadatas=metadatas,
-                ids=ids
-            )
-
-            if vector_success:
-                logger.info(f"文本添加成功: {len(chunks)} 个片段")
-                return {
-                    'success': True,
-                    'chunks_added': len(chunks),
-                    'entities_processed': len(neural_result.get('entities', [])),
-                    'triplets_processed': len(neural_result.get('triplets', []))
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': '添加到向量存储失败'
-                }
-
-        except Exception as e:
-            logger.error(f"添加文本失败: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-
-    def query_memory(
-        self,
-        query: str,
-        n_results: int = 5,
-        filter_metadata: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        查询记忆
-
-        Args:
-            query: 查询文本
-            n_results: 返回结果数量
-            filter_metadata: 元数据过滤条件
-
-        Returns:
-            List[Dict[str, Any]]: 查询结果列表
-        """
-        try:
-            logger.info(f"查询记忆: {query}")
-            
-            # 向量搜索（模糊检索）
-            vector_results = self.vector_store.similarity_search(
-                query=query,
-                n_results=n_results,
-                where=filter_metadata
-            )
-            
-            # 图谱查询（结构化检索）
-            graph_results = self._query_graph(query)
-            
-            # 合并结果，优先返回图谱结果
-            all_results = graph_results + vector_results
-            
-            # 去重并限制结果数量
-            unique_results = []
-            seen_content = set()
-            
-            for result in all_results:
-                content = result.get('content', '')
-                if content and content not in seen_content:
-                    seen_content.add(content)
-                    unique_results.append(result)
-                    
-                    if len(unique_results) >= n_results:
-                        break
-            
-            logger.info(f"搜索完成，找到 {len(unique_results)} 个相关结果")
-            return unique_results
-        except Exception as e:
-            logger.error(f"查询记忆失败: {e}")
-            return []
-
-    def _query_graph(self, query: str) -> List[Dict[str, Any]]:
-        """
-        查询图数据库，结合时间轴和实体关系
-
-        Args:
-            query: 查询文本
-
-        Returns:
-            List[Dict[str, Any]]: 查询结果列表
-        """
-        try:
-            results = []
-            
-            # 1. 提取查询中的实体（概念）
-            neural_result = self.neural_processor.process_text(query)
-            entities = neural_result.get('entities', [])
-            
-            # 2. 按概念查询
-            for entity in entities:
-                concept_results = self.graph_store.query_by_concept(entity)
-                for res in concept_results:
-                    log = res.get('l', {})
-                    project = res.get('p', {})
-                    concept = res.get('c', {})
-                    
-                    if log:
-                        results.append({
-                            'content': log.get('content', ''),
-                            'type': 'graph_concept_match',
-                            'timestamp': str(log.get('timestamp', '')),
-                            'metadata': {
-                                'concept': concept.get('name', ''),
-                                'project': project.get('name', '') if project else None
-                            }
-                        })
-            
-            # 3. 如果结果不足，按时间范围进行关键词匹配
-            if len(results) < 5:
-                # 查询最近的日志
-                recent_logs = self.graph_store.query_by_time_range(
-                    start_time="2025-01-01 00:00:00",
-                    end_time="2026-12-31 23:59:59"
-                )
-                
-                for log in recent_logs:
-                    content = log.get('content', '')
-                    if query.lower() in content.lower():
-                        # 避免重复
-                        if not any(r['content'] == content for r in results):
-                            results.append({
-                                'content': content,
-                                'type': 'graph_keyword_match',
-                                'timestamp': str(log.get('timestamp', '')),
-                                'metadata': {'id': log.get('id', '')}
-                            })
-                    
-                    if len(results) >= 10:
-                        break
-            
-            return results
-        except Exception as e:
-            logger.error(f"图谱查询失败: {e}")
-            return []
-
-    def get_stats(self) -> Dict[str, Any]:
-        """
-        获取记忆统计信息
-
-        Returns:
-            Dict[str, Any]: 统计信息
-        """
-        try:
-            # 向量存储统计
-            vector_stats = self.vector_store.get_stats()
-            
-            # 图数据库统计
-            graph_stats = self.graph_store.get_stats()
-            
-            return {
-                'vector_store': vector_stats,
-                'graph_store': graph_stats
-            }
-        except Exception as e:
-            logger.error(f"获取统计信息失败: {e}")
-            return {
-                'error': str(e)
-            }
-
-    def clear_memory(self) -> Dict[str, Any]:
-        """
-        清空所有记忆
-
-        Returns:
-            Dict[str, Any]: 操作结果
-        """
-        try:
-            # 清空向量存储
-            vector_success = self.vector_store.clear_collection()
-            
-            # 清空图数据库
-            graph_success = self._clear_graph_database()
-            
-            if vector_success and graph_success:
-                logger.info("记忆已清空，包括向量存储和图数据库")
-                return {
-                    'success': True,
-                    'message': '记忆已清空，包括向量存储和图数据库'
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': '清空记忆失败'
-                }
-        except Exception as e:
-            logger.error(f"清空记忆失败: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-
-    def _clear_graph_database(self) -> bool:
-        """
-        清空图数据库
-        
-        Returns:
-            bool: 是否清空成功
-        """
-        try:
-            # 删除所有节点表数据（保留表结构）
-            # 使用DETACH DELETE来删除有关系的节点
-            node_tables = ["User", "Goal", "Project", "Task", "Log", "Concept"]
-            for table in node_tables:
+            def process_chunk(chunk_text: str, idx: int):
                 try:
-                    self.graph_store.conn.execute(f"MATCH (n:{table}) DETACH DELETE n")
-                    logger.info(f"已清空 {table} 节点表")
+                    # 为每个片段创建一个子日志节点
+                    chunk_id = f"{file_id}_chunk_{idx}"
+                    self.graph_store.add_log(log_id=chunk_id, content=chunk_text[:200] + "...", timestamp=timestamp, log_type="file_chunk")
+                    
+                    # 神经提取
+                    neural_result = self.neural_processor.process_text(chunk_text)
+                    entities = neural_result.get('entities', [])
+                    
+                    return chunk_id, entities
                 except Exception as e:
-                    logger.warning(f"清空 {table} 节点表失败: {e}")
+                    logger.error(f"处理片段 {idx} 失败: {e}")
+                    return None, []
+
+            # 使用分批处理加速，限制并发避免内存溢出
+            all_relations = []
+            all_concepts_to_add = []
+            batch_size = 20
             
-            return True
+            for i in range(0, len(chunks), batch_size):
+                batch_chunks = chunks[i:i + batch_size]
+                logger.info(f"正在处理文档分块批次: {i//batch_size + 1}/{(len(chunks)-1)//batch_size + 1}")
+                
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [executor.submit(process_chunk, chunk, i + j) for j, chunk in enumerate(batch_chunks)]
+                    for future in as_completed(futures):
+                        chunk_id, entities = future.result()
+                        if not chunk_id: continue
+                        
+                        for entity in entities:
+                            if not entity.strip(): continue
+                            entity_vector = self.neural_processor.embed_text(entity)
+                            if not entity_vector: continue
+                            
+                            canonical_id, is_new = self._get_or_create_canonical_concept(entity, entity_vector)
+                            
+                            if is_new:
+                                all_concepts_to_add.append({
+                                    'id': canonical_id,
+                                    'name': entity,
+                                    'vector': entity_vector
+                                })
+                            
+                            all_relations.append((chunk_id, canonical_id))
+                
+                # 及时写入并清理，避免大文件处理时列表过长耗尽内存
+                if len(all_concepts_to_add) > 100:
+                    self.graph_store.add_concepts_batch(all_concepts_to_add)
+                    all_concepts_to_add = []
+                
+                if len(all_relations) > 300:
+                    self.graph_store.add_mentions_batch(all_relations)
+                    all_relations = []
+            
+            # 3. 批量写入图谱
+            if all_concepts_to_add:
+                self.graph_store.add_concepts_batch(all_concepts_to_add)
+            
+            if all_relations:
+                self.graph_store.add_mentions_batch(all_relations)
+            
+            return {
+                "success": True, 
+                "file_path": file_path, 
+                "chunks_processed": len(chunks),
+                "entities_found": len(all_relations)
+            }
         except Exception as e:
-            logger.error(f"清空图数据库失败: {e}")
-            return False
+            logger.error(f"处理普通文件失败: {e}")
+            return {"success": False, "error": str(e)}
 
-    def delete_by_file(self, file_path: str) -> Dict[str, Any]:
+    def _ingest_conversation_file(self, file_path: str, chunks: List[str], metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
-        删除指定文件的所有记忆
-
-        Args:
-            file_path: 文件路径
-
-        Returns:
-            Dict[str, Any]: 操作结果
+        处理对话记录文件，使用并行处理和批量写入优化大文件支持
         """
         try:
-            path = Path(file_path)
-            prefix = path.stem
+            logger.info(f"开始高性能处理对话文件: {file_path}")
+            conversations = self.file_processor.extract_conversations_with_time(file_path)
             
-            # 从向量存储删除
-            stats = self.get_stats()
-            vector_stats = stats.get('vector_store', {})
-            if 'total_documents' in vector_stats and vector_stats['total_documents'] > 0:
-                all_results = self.vector_store.collection.get()
+            if not conversations:
+                return {"success": True, "processed_count": 0, "message": "没有找到有效的对话记录"}
+
+            all_concepts_to_add = []
+            all_relations = []
+            processed_count = 0
+            
+            def process_single_conv(conv, idx):
+                content = conv.get('content', '')
+                timestamp = conv.get('create_time', '')
+                if not content: return None
                 
-                ids_to_delete = []
-                for doc_id in all_results['ids']:
-                    if doc_id.startswith(prefix):
-                        ids_to_delete.append(doc_id)
+                log_id = f"conv_{uuid.uuid4().hex[:6]}_{idx}"
                 
-                if ids_to_delete:
-                    vector_success = self.vector_store.delete_by_ids(ids_to_delete)
-                    if not vector_success:
-                        logger.error(f"从向量存储删除失败")
+                # 先同步写入日志节点（KuzuDB 在多线程写入同一表时可能需要更谨慎，但 Log 是主干）
+                if self.graph_store.add_log(log_id=log_id, content=content, timestamp=timestamp, log_type="conversation"):
+                    # 神经提取实体
+                    neural_result = self.neural_processor.process_text(content)
+                    entities_data = []
+                    
+                    for entity in neural_result.get('entities', []):
+                        if not entity.strip(): continue
+                        entity_vector = self.neural_processor.embed_text(entity)
+                        if not entity_vector: continue
+                        
+                        canonical_id, is_new = self._get_or_create_canonical_concept(entity, entity_vector)
+                        entities_data.append({
+                            'id': canonical_id,
+                            'name': entity,
+                            'vector': entity_vector,
+                            'is_new': is_new,
+                            'log_id': log_id
+                        })
+                    return entities_data
+                return None
+
+            # 限制并发数，避免资源耗尽（对于 MPS 设备，过高并发反而降低性能且易崩溃）
+            # 使用更稳健的批量处理方式
+            batch_size = 50
+            for i in range(0, len(conversations), batch_size):
+                batch = conversations[i:i + batch_size]
+                logger.info(f"正在处理对话批次: {i//batch_size + 1}/{(len(conversations)-1)//batch_size + 1}")
+                
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [executor.submit(process_single_conv, conv, i + j) for j, conv in enumerate(batch)]
+                    
+                    for future in as_completed(futures):
+                        result = future.result()
+                        if result:
+                            processed_count += 1
+                            for item in result:
+                                if item['is_new']:
+                                    all_concepts_to_add.append({
+                                        'id': item['id'],
+                                        'name': item['name'],
+                                        'vector': item['vector']
+                                    })
+                                all_relations.append((item['log_id'], item['id']))
+                
+                # 每处理一批，如果积累了较多概念或关系，先写入一次，释放内存
+                if len(all_concepts_to_add) > 200:
+                    unique_concepts = {c['id']: c for c in all_concepts_to_add}.values()
+                    self.graph_store.add_concepts_batch(list(unique_concepts))
+                    all_concepts_to_add = []
+                
+                if len(all_relations) > 500:
+                    self.graph_store.add_mentions_batch(all_relations)
+                    all_relations = []
+
+            # 批量写入概念和关系
+            if all_concepts_to_add:
+                # 去重（不同片段可能发现相同的新概念）
+                unique_concepts = {c['id']: c for c in all_concepts_to_add}.values()
+                self.graph_store.add_concepts_batch(list(unique_concepts))
             
-            # 从图数据库删除（简化实现）
-            # 实际应用中需要更复杂的删除逻辑
-            graph_success = True  # 简化实现
+            if all_relations:
+                self.graph_store.add_mentions_batch(all_relations)
             
-            if vector_success and graph_success:
-                logger.info(f"已删除文件 {file_path} 的相关记忆")
-                return {
-                    'success': True,
-                    'deleted_count': len(ids_to_delete) if 'ids_to_delete' in locals() else 0,
-                    'file_path': file_path
-                }
+            logger.info(f"对话文件处理完成: {processed_count} 条记录, {len(all_relations)} 个关联")
+            return {"success": True, "processed_count": processed_count, "relations_count": len(all_relations)}
             
-            return {
-                'success': False,
-                'error': '未找到相关记忆',
-                'file_path': file_path
-            }
         except Exception as e:
-            logger.error(f"删除记忆失败: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'file_path': file_path
-            }
+            logger.error(f"处理对话文件失败: {e}")
+            return {"success": False, "error": str(e)}
+
+
+# 全局单例
+_memory_service_instance = None
+
+def get_memory_service() -> MemoryService:
+    """获取记忆服务单例"""
+    global _memory_service_instance
+    if _memory_service_instance is None:
+        _memory_service_instance = MemoryService()
+    return _memory_service_instance

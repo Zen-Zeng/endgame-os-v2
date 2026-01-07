@@ -4,6 +4,7 @@ KuzuDB 图数据库封装
 """
 import kuzu
 import logging
+import threading
 from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 
@@ -26,7 +27,16 @@ class GraphStore:
         """
         self.db_path = db_path
         self.db = None
+        self._lock = threading.Lock()
+        self._local = threading.local()
         self._initialize_db()
+
+    @property
+    def conn(self):
+        """线程本地连接，确保每个线程使用独立的 Kuzu 连接，避免崩溃"""
+        if not hasattr(self._local, 'conn'):
+            self._local.conn = kuzu.Connection(self.db)
+        return self._local.conn
 
     def _initialize_db(self):
         """
@@ -40,41 +50,46 @@ class GraphStore:
             
             logger.info(f"KuzuDB 存储路径: {self.db_path}")
 
-            # 创建数据库连接
+            # 创建数据库对象
             self.db = kuzu.Database(self.db_path)
             
-            # 创建连接
-            self.conn = kuzu.Connection(self.db)
-            logger.info("KuzuDB 连接创建成功")
-
-            # 初始化 Schema
-            self._create_schema()
+            # 初始化 Schema (使用临时连接)
+            conn = kuzu.Connection(self.db)
+            self._create_schema(conn)
             logger.info("KuzuDB Schema 初始化完成")
 
         except Exception as e:
             logger.error(f"KuzuDB 初始化失败: {e}")
             raise
 
-    def _create_schema(self):
+    def get_connection(self):
+        """获取一个数据库连接"""
+        return kuzu.Connection(self.db)
+
+    def _create_schema(self, conn=None):
         """
         创建图数据库 Schema
         根据技术架构规范定义节点和关系
         """
         try:
+            # 如果没有传入连接，创建一个
+            if conn is None:
+                conn = self.get_connection()
+
             # 节点定义 (Nodes)
-            self.conn.execute("CREATE NODE TABLE IF NOT EXISTS User (name STRING, vision STRING, PRIMARY KEY (name))")
-            self.conn.execute("CREATE NODE TABLE IF NOT EXISTS Goal (id STRING, title STRING, deadline DATE, status STRING, PRIMARY KEY (id))")
-            self.conn.execute("CREATE NODE TABLE IF NOT EXISTS Project (id STRING, name STRING, sector STRING, PRIMARY KEY (id))")
-            self.conn.execute("CREATE NODE TABLE IF NOT EXISTS Task (id STRING, title STRING, status STRING, PRIMARY KEY (id))")
-            self.conn.execute("CREATE NODE TABLE IF NOT EXISTS Log (id STRING, content STRING, timestamp TIMESTAMP, type STRING, PRIMARY KEY (id))")
-            self.conn.execute("CREATE NODE TABLE IF NOT EXISTS Concept (id STRING, name STRING, vector FLOAT[768], PRIMARY KEY (id))")
+            conn.execute("CREATE NODE TABLE IF NOT EXISTS User (name STRING, vision STRING, PRIMARY KEY (name))")
+            conn.execute("CREATE NODE TABLE IF NOT EXISTS Goal (id STRING, title STRING, deadline DATE, status STRING, PRIMARY KEY (id))")
+            conn.execute("CREATE NODE TABLE IF NOT EXISTS Project (id STRING, name STRING, sector STRING, PRIMARY KEY (id))")
+            conn.execute("CREATE NODE TABLE IF NOT EXISTS Task (id STRING, title STRING, status STRING, PRIMARY KEY (id))")
+            conn.execute("CREATE NODE TABLE IF NOT EXISTS Log (id STRING, content STRING, timestamp TIMESTAMP, type STRING, PRIMARY KEY (id))")
+            conn.execute("CREATE NODE TABLE IF NOT EXISTS Concept (id STRING, name STRING, vector FLOAT[1024], PRIMARY KEY (id))")
 
             # 关系定义 (Edges)
-            self.conn.execute("CREATE REL TABLE IF NOT EXISTS HAS_GOAL (FROM User TO Goal)")
-            self.conn.execute("CREATE REL TABLE IF NOT EXISTS BELONGS_TO (FROM Project TO Goal)")
-            self.conn.execute("CREATE REL TABLE IF NOT EXISTS BLOCKED_BY (FROM Task TO Task)")
-            self.conn.execute("CREATE REL TABLE IF NOT EXISTS CONTRIBUTES_TO (FROM Log TO Project)")
-            self.conn.execute("CREATE REL TABLE IF NOT EXISTS MENTIONS (FROM Log TO Concept)")
+            conn.execute("CREATE REL TABLE IF NOT EXISTS HAS_GOAL (FROM User TO Goal)")
+            conn.execute("CREATE REL TABLE IF NOT EXISTS BELONGS_TO (FROM Project TO Goal)")
+            conn.execute("CREATE REL TABLE IF NOT EXISTS BLOCKED_BY (FROM Task TO Task)")
+            conn.execute("CREATE REL TABLE IF NOT EXISTS CONTRIBUTES_TO (FROM Log TO Project)")
+            conn.execute("CREATE REL TABLE IF NOT EXISTS MENTIONS (FROM Log TO Concept)")
 
             logger.info("Schema 创建完成")
         except Exception as e:
@@ -209,6 +224,63 @@ class GraphStore:
             logger.error(f"添加概念节点失败: {e}")
             return False
 
+    def add_concepts_batch(self, concepts: List[Dict[str, Any]]) -> bool:
+        """
+        批量添加概念节点
+
+        Args:
+            concepts: 概念列表，每个包含 id, name, vector (可选)
+
+        Returns:
+            bool: 是否全部添加成功
+        """
+        try:
+            for c in concepts:
+                concept_id = c['id']
+                name = c['name']
+                vector = c.get('vector')
+                
+                if vector:
+                    vector_str = str(vector).replace('[', '').replace(']', '')
+                    query = f"CREATE (c:Concept {{id: '{concept_id}', name: '{name}', vector: [{vector_str}]}})"
+                else:
+                    query = f"CREATE (c:Concept {{id: '{concept_id}', name: '{name}'}})"
+                
+                try:
+                    self.conn.execute(query)
+                except Exception as e:
+                    if "already exists" in str(e).lower():
+                        continue # 忽略已存在的节点
+                    raise e
+            return True
+        except Exception as e:
+            logger.error(f"批量添加概念节点失败: {e}")
+            return False
+
+    def add_mentions_batch(self, relations: List[Tuple[str, str]]) -> bool:
+        """
+        批量添加日志-概念提及关系
+
+        Args:
+            relations: 关系列表，每个元素为 (log_id, concept_id)
+
+        Returns:
+            bool: 是否全部添加成功
+        """
+        try:
+            for log_id, concept_id in relations:
+                query = f"MATCH (l:Log {{id: '{log_id}'}}), (c:Concept {{id: '{concept_id}'}}) CREATE (l)-[:MENTIONS]->(c)"
+                try:
+                    self.conn.execute(query)
+                except Exception as e:
+                    if "already exists" in str(e).lower():
+                        continue
+                    logger.warning(f"建立关系失败 {log_id}->{concept_id}: {e}")
+            return True
+        except Exception as e:
+            logger.error(f"批量建立关系失败: {e}")
+            return False
+
     def add_has_goal_relation(self, user_name: str, goal_id: str) -> bool:
         """
         添加用户-目标关系
@@ -304,6 +376,27 @@ class GraphStore:
             logger.error(f"添加MENTIONS关系失败: {e}")
             return False
 
+    def update_node_status(self, node_type: str, node_id: str, new_status: str) -> bool:
+        """
+        更新节点的状态
+
+        Args:
+            node_type: 节点类型 (User, Goal, Project, Task, Log, Concept)
+            node_id: 节点ID
+            new_status: 新状态
+
+        Returns:
+            bool: 是否更新成功
+        """
+        try:
+            query = f"MATCH (n:{node_type}) WHERE n.id = '{node_id}' SET n.status = '{new_status}'"
+            self.conn.execute(query)
+            logger.info(f"节点状态更新成功: {node_type}({node_id}) -> {new_status}")
+            return True
+        except Exception as e:
+            logger.error(f"更新节点状态失败: {node_type}({node_id}), {e}")
+            return False
+
     def query_by_time_range(self, start_time: str, end_time: str) -> List[Dict[str, Any]]:
         """
         按时间范围查询日志
@@ -327,7 +420,7 @@ class GraphStore:
 
     def query_related_concepts(self, log_id: str) -> List[Dict[str, Any]]:
         """
-        查询日志相关的概念
+        查询与日志相关的概念
 
         Args:
             log_id: 日志ID
@@ -345,6 +438,46 @@ class GraphStore:
             logger.error(f"查询相关概念失败: {e}")
             return []
 
+    def get_all_graph_data(self) -> Dict[str, Any]:
+        """
+        获取所有图数据（用于前端可视化）
+        
+        注意：在当前环境下，全量图查询会导致底层引擎崩溃，暂时返回空数据。
+        统计数据请使用 get_stats 接口。
+        """
+        return {
+            "nodes": [],
+            "links": [],
+            "total_nodes": 0,
+            "total_links": 0,
+            "status": "temporarily_disabled_for_stability"
+        }
+
+    def clear_all_data(self):
+        """清除所有图数据"""
+        try:
+            logger.info("开始清空图数据库...")
+            # 删除所有关系
+            rel_tables = ["HAS_GOAL", "BELONGS_TO", "BLOCKED_BY", "CONTRIBUTES_TO", "MENTIONS"]
+            for rel_table in rel_tables:
+                try:
+                    self.conn.execute(f"MATCH (a)-[r:{rel_table}]->(b) DELETE r")
+                except Exception as e:
+                    logger.warning(f"删除关系表 {rel_table} 失败 (可能表为空): {e}")
+
+            # 删除所有节点
+            node_tables = ["User", "Goal", "Project", "Task", "Log", "Concept"]
+            for node_table in node_tables:
+                try:
+                    self.conn.execute(f"MATCH (n:{node_table}) DELETE n")
+                except Exception as e:
+                    logger.warning(f"删除节点表 {node_table} 失败 (可能表为空): {e}")
+            
+            logger.info("图数据库已清空")
+        except Exception as e:
+            logger.error(f"清空图数据库失败: {e}")
+            raise e
+
     def get_stats(self) -> Dict[str, Any]:
         """
         获取图数据库统计信息
@@ -355,43 +488,45 @@ class GraphStore:
         try:
             stats = {}
             
-            # 节点统计
-            node_counts = {}
-            for node_type in ["User", "Goal", "Project", "Task", "Log", "Concept"]:
-                try:
-                    count_result = self.conn.execute(f"MATCH (n:{node_type}) RETURN count(n) AS count")
-                    result_list = count_result.get_as_arrow().to_pylist()
-                    if result_list:
-                        node_counts[node_type] = result_list[0]["count"]
-                    else:
+            with self._lock:
+                # 节点统计
+                node_counts = {}
+                for node_type in ["User", "Goal", "Project", "Task", "Log", "Concept"]:
+                    try:
+                        count_result = self.conn.execute(f"MATCH (n:{node_type}) RETURN count(n) AS count")
+                        result_list = count_result.get_as_arrow().to_pylist()
+                        if result_list:
+                            node_counts[node_type] = result_list[0]["count"]
+                        else:
+                            node_counts[node_type] = 0
+                    except Exception as e:
+                        logger.error(f"查询 {node_type} 节点数量失败: {e}")
                         node_counts[node_type] = 0
-                except Exception as e:
-                    logger.error(f"查询 {node_type} 节点数量失败: {e}")
-                    node_counts[node_type] = 0
-            
-            stats["node_counts"] = node_counts
-            
-            # 关系统计
-            rel_counts = {}
-            for rel_type in ["HAS_GOAL", "BELONGS_TO", "BLOCKED_BY", "CONTRIBUTES_TO", "MENTIONS"]:
-                try:
-                    count_result = self.conn.execute(f"MATCH ()-[:{rel_type}]->() RETURN count(*) AS count")
-                    result_list = count_result.get_as_arrow().to_pylist()
-                    if result_list:
-                        rel_counts[rel_type] = result_list[0]["count"]
-                    else:
+                
+                stats["node_counts"] = node_counts
+                
+                # 关系统计
+                rel_counts = {}
+                for rel_type in ["HAS_GOAL", "BELONGS_TO", "BLOCKED_BY", "CONTRIBUTES_TO", "MENTIONS"]:
+                    try:
+                        # 改进查询语句，使其更健壮
+                        count_result = self.conn.execute(f"MATCH (a)-[r:{rel_type}]->(b) RETURN count(r) AS count")
+                        result_list = count_result.get_as_arrow().to_pylist()
+                        if result_list:
+                            rel_counts[rel_type] = result_list[0]["count"]
+                        else:
+                            rel_counts[rel_type] = 0
+                    except Exception as e:
+                        logger.error(f"查询 {rel_type} 关系数量失败: {e}")
                         rel_counts[rel_type] = 0
-                except Exception as e:
-                    logger.error(f"查询 {rel_type} 关系数量失败: {e}")
-                    rel_counts[rel_type] = 0
-            
-            stats["relation_counts"] = rel_counts
-            stats["db_path"] = self.db_path
+                
+                stats["relation_counts"] = rel_counts
+                stats["db_path"] = self.db_path
             
             return stats
         except Exception as e:
             logger.error(f"获取统计信息失败: {e}")
-            return {"error": str(e)}
+            return {"error": str(e), "node_counts": {}, "relation_counts": {}}
 
     def query_by_concept(self, concept_name: str) -> List[Dict[str, Any]]:
         """
