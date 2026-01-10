@@ -14,10 +14,10 @@ import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import ChatPage from './pages/ChatPage';
 import CalibrationPage from './pages/CalibrationPage';
-import ArchivesPage from './pages/ArchivesPage';
+import GoalsPage from './pages/GoalsPage';
+import NeuralLinkPage from './pages/NeuralLinkPage';
 import MemoryPage from './pages/MemoryPage';
 import MorningWakePage from './pages/MorningWakePage';
-import SettingsPage from './pages/SettingsPage';
 
 // 引导页面
 import PersonaSetupPage from './pages/onboarding/PersonaSetupPage';
@@ -155,9 +155,9 @@ export default function App() {
         <Route path="morning" element={<MorningWakePage />} />
         <Route path="chat" element={<ChatPage />} />
         <Route path="calibration" element={<CalibrationPage />} />
-        <Route path="archives" element={<ArchivesPage />} />
-        <Route path="memory" element={<MemoryPage />} />
-        <Route path="settings" element={<SettingsPage />} />
+        <Route path="goals" element={<GoalsPage />} />
+        <Route path="neural-link" element={<NeuralLinkPage />} />
+        <Route path="memory-map" element={<MemoryPage />} />
       </Route>
 
       {/* 404 重定向 */}

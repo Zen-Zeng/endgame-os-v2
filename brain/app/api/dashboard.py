@@ -13,72 +13,244 @@ from ..models.dashboard import (
 )
 from ..models.user import User
 from .auth import require_user
+from ..core.db import db_manager
+from ..services.memory.memory_service import get_memory_service
+from ..models.memory import MemoryType
+from ..core.config import DATA_DIR, ENDGAME_VISION
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
+import json
+import asyncio
+import logging
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
+CONVERSATIONS_FILE = DATA_DIR / "conversations.json"
+MESSAGES_FILE = DATA_DIR / "messages.json"
 
-# ============ 模拟数据存储 ============
+def _load_json_data(file_path, default_value):
+    logger.info(f"正在加载 JSON 数据: {file_path}")
+    if file_path.exists():
+        try:
+            content = file_path.read_text(encoding='utf-8')
+            data = json.loads(content)
+            logger.info(f"成功加载数据，项数: {len(data)}")
+            return data
+        except Exception as e:
+            logger.error(f"加载 JSON 失败 {file_path}: {e}")
+            return default_value
+    else:
+        logger.warning(f"文件不存在: {file_path}")
+    return default_value
 
-_activity_logs_db: dict[str, List[dict]] = {}  # user_id -> [ActivityLog]
-_goals_db: dict[str, List[dict]] = {}  # user_id -> [GoalProgress]
-
+# 模拟活动日志数据库 (生产环境应从数据库获取)
+_activity_logs_db = {}
 
 # ============ 辅助函数 ============
 
-def _calculate_streak(user_id: str) -> int:
+def _calculate_streak(user_id: str, messages: List[dict]) -> int:
     """计算连续活跃天数"""
-    logs = _activity_logs_db.get(user_id, [])
-    if not logs:
+    active_dates = set()
+    
+    # 1. 收集消息日期
+    for msg in messages:
+        if "created_at" in msg:
+            try:
+                dt_str = msg["created_at"]
+                if isinstance(dt_str, str):
+                    dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+                    active_dates.add(dt.date())
+            except:
+                continue
+    
+    # 2. 收集校准日期 (补充活跃度)
+    try:
+        calibrations = db_manager.get_h3_calibrations(user_id, 90) # 查最近 90 天
+        for c in calibrations:
+            if "created_at" in c:
+                dt = datetime.fromisoformat(c["created_at"]).date()
+                active_dates.add(dt)
+    except Exception as e:
+        logger.error(f"获取校准记录失败: {e}")
+
+    if not active_dates:
         return 0
     
-    # 按日期分组
-    active_dates = set()
-    for log in logs:
-        log_date = datetime.fromisoformat(log["created_at"]).date()
-        active_dates.add(log_date)
-    
-    # 计算连续天数
+    # 3. 计算连续天数 (从今天或最近的一个活跃日开始往回倒推)
     streak = 0
-    check_date = date.today()
+    today = date.today()
+    
+    # 如果今天活跃，从今天开始算
+    # 如果今天不活跃，从昨天开始算 (允许 1 天的容错中断，或者说只看连续到昨天的)
+    check_date = today
+    if today not in active_dates:
+        check_date = today - timedelta(days=1)
     
     while check_date in active_dates:
         streak += 1
         check_date -= timedelta(days=1)
     
+    # 如果今天刚活跃（之前没活动），streak 应该是 1
+    if streak == 0 and today in active_dates:
+        streak = 1
+        
     return streak
 
 
 def _get_user_stats(user_id: str) -> DashboardStats:
-    """获取用户统计数据"""
-    logs = _activity_logs_db.get(user_id, [])
-    goals = _goals_db.get(user_id, [])
+    """计算用户的各项统计指标"""
+    today = date.today()
+    
+    # 1. 加载数据
+    all_convs = _load_json_data(CONVERSATIONS_FILE, {})
+    all_messages = _load_json_data(MESSAGES_FILE, {})
+    
+    logger.info(f"加载原始数据: {len(all_convs)} 个会话, {len(all_messages)} 组消息")
+    
+    # 过滤用户数据
+    user_convs = [c for c in all_convs.values() if c.get("user_id") == user_id]
+    
+    user_messages = []
+    for conv_id in [c["id"] for c in user_convs]:
+        if conv_id in all_messages:
+            user_messages.extend(all_messages[conv_id])
+    
+    # 按时间排序，确保 streak 计算和 last_active 正确
+    user_messages.sort(key=lambda x: x.get("created_at", ""))
+    
+    logger.info(f"过滤后数据: {len(user_convs)} 个会话, {len(user_messages)} 条消息")
     
     today = date.today()
-    today_logs = [
-        l for l in logs
-        if datetime.fromisoformat(l["created_at"]).date() == today
+    today_messages = [
+        m for m in user_messages 
+        if "created_at" in m and datetime.fromisoformat(m["created_at"]).date() == today
     ]
     
-    # 计算各类统计
-    chat_logs = [l for l in logs if l["type"] == "chat"]
-    calibration_logs = [l for l in today_logs if l["type"] == "calibration"]
-    task_logs = [l for l in today_logs if l["type"] == "task_complete"]
+    # 2. 获取目标数据
+    service = get_memory_service()
+    goals = service.graph_store.get_nodes_by_type(user_id, MemoryType.GOAL.value)
+    completed_goals = [g for g in goals if g.get("dossier", {}).get("status") == "completed"]
     
-    completed_goals = [g for g in goals if g["status"] == "completed"]
+    # 3. 获取 H3 能量
+    h3_history = db_manager.get_h3_energy_history(user_id, 1)
+    current_h3 = None
+    if h3_history:
+        h3 = h3_history[0]
+        current_h3 = {
+            "mind": h3.get("mind", 0),
+            "body": h3.get("body", 0),
+            "spirit": h3.get("spirit", 0),
+            "vocation": h3.get("vocation", 0)
+        }
+    
+    # 4. 获取校准记录 (作为活跃度的 fallback)
+    calibrations = db_manager.get_h3_calibrations(user_id, 30)
+    today_calibrations = [
+        c for c in calibrations 
+        if datetime.fromisoformat(c["created_at"]).date() == today
+    ]
+
+    # 5. 计算能量点 (更稳健的算法)
+    # 连胜奖励：连胜天数 * 50
+    streak_val = _calculate_streak(user_id, user_messages)
+    streak_bonus = streak_val * 50
+    
+    # 活跃奖励：对话数 * 2 (历史权重) + 校准数 * 50
+    activity_points = (len(user_messages) * 2) + (len(calibrations) * 50)
+    
+    # 目标奖励：每个完成的目标 200 分
+    goal_bonus = len(completed_goals) * 200
+    
+    # 存量分：每 10 条消息额外奖励 10 分 (体现数据厚度)
+    legacy_points = (len(user_messages) // 10) * 10
+    
+    energy_points = streak_bonus + activity_points + goal_bonus + legacy_points
+    
+    # 如果 streak 为 0 但今天有活动，设为 1
+    if streak_val == 0 and (len(today_messages) > 0 or len(today_calibrations) > 0):
+        streak_val = 1
     
     return DashboardStats(
         user_id=user_id,
         date=today,
-        total_conversations=len(set(l.get("entity_id") for l in chat_logs if l.get("entity_id"))),
-        total_messages=len(chat_logs),
+        total_conversations=len(user_convs),
+        total_messages=len(user_messages),
         total_goals=len(goals),
         completed_goals=len(completed_goals),
-        streak_days=_calculate_streak(user_id),
-        last_active=datetime.fromisoformat(logs[-1]["created_at"]) if logs else None,
-        today_messages=len([l for l in today_logs if l["type"] == "chat"]),
-        today_calibrations=len(calibration_logs),
-        today_tasks_completed=len(task_logs)
+        streak_days=streak_val,
+        energy_points=int(energy_points),
+        last_active=datetime.fromisoformat(user_messages[-1]["created_at"]) if user_messages else None,
+        current_h3=current_h3,
+        today_messages=len(today_messages),
+        today_calibrations=len(today_calibrations),
+        today_tasks_completed=0
     )
+
+
+# ============ AI 总结逻辑 ============
+
+async def _generate_ai_summary(stats: DashboardStats, user_id: str) -> str:
+    """基于当前状态生成 AI 实时总结"""
+    # 获取 H3 能量平均值和趋势
+    h3_history = db_manager.get_h3_energy_history(user_id, 7)
+    avg_energy = sum((e['mind'] + e['body'] + e['spirit'] + e['vocation']) / 4 for e in h3_history) / len(h3_history) if h3_history else 50
+    
+    hour = datetime.now().hour
+    if hour < 5: greeting = "深夜了，系统建议进入深度修复模式"
+    elif hour < 11: greeting = "晨间协议已激活，今日是实现愿景的关键节点"
+    elif hour < 14: greeting = "正午时分，建议回顾上午的认知消耗"
+    elif hour < 18: greeting = "午后推进中，保持心智专注度"
+    else: greeting = "傍晚好，即将进入日终复盘时间"
+    
+    status_msg = ""
+    if avg_energy > 80:
+        status_msg = "当前能量水平极佳，适合处理高复杂度的 Critical Tasks。"
+    elif avg_energy < 40:
+        status_msg = "检测到能量赤字，建议调低今日认知负荷，优先进行能量校准。"
+    else:
+        status_msg = f"系统运行平稳。当前有 {stats.total_goals} 个活跃目标，{stats.streak_days} 天连续对齐。"
+        
+    return f"{greeting}。{status_msg}"
+
+
+async def _summarize_vision(vision_desc: str) -> str:
+    """使用 AI 总结长篇愿景画布"""
+    # 如果描述比较短，或者已经是总结过的，直接返回
+    if not vision_desc or len(vision_desc) < 150:
+        return vision_desc
+    
+    # 检查是否包含 Markdown 标题，如果有，说明是原始画布
+    if "##" not in vision_desc and len(vision_desc) < 300:
+        return vision_desc
+
+    logger.info("正在生成愿景总结...")
+    prompt = f"""
+    作为用户的“数字分身”，请将以下长篇幅的“终局愿景画布”总结为一段简洁、有力、且富有启发性的愿景描述（约 150 字以内）。
+    
+    要求：
+    1. 保持第一人称（“我”）或具有感染力的视角。
+    2. 提取最核心的商业终局（做什么）、自我终局（生活状态）和影响终局（价值）。
+    3. 语言要精炼，具有画面感，不要列举大纲。
+    
+    原文内容：
+    {vision_desc}
+    
+    总结后的愿景：
+    """
+    
+    try:
+        # 增加超时控制
+        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7, timeout=10)
+        response = await asyncio.wait_for(llm.ainvoke([HumanMessage(content=prompt)]), timeout=12)
+        return response.content.strip()
+    except asyncio.TimeoutError:
+        logger.warning("AI 总结愿景超时，使用截断文本")
+        return vision_desc[:150] + "..." if len(vision_desc) > 150 else vision_desc
+    except Exception as e:
+        logger.error(f"AI 总结愿景失败: {e}")
+        # 如果失败，返回前 150 个字符
+        return vision_desc[:150] + "..." if len(vision_desc) > 150 else vision_desc
 
 
 # ============ API 端点 ============
@@ -87,40 +259,112 @@ def _get_user_stats(user_id: str) -> DashboardStats:
 async def get_dashboard_overview(user: User = Depends(require_user)):
     """
     获取仪表盘总览数据
-    
-    包含统计数据、最近活动、活跃目标、即将到来的里程碑
     """
     stats = _get_user_stats(user.id)
     
-    # 获取最近活动
-    logs = _activity_logs_db.get(user.id, [])
-    recent_logs = sorted(logs, key=lambda x: x["created_at"], reverse=True)[:10]
-    recent_activities = [ActivityLog(**l) for l in recent_logs]
+    # 1. 生成 AI 总结
+    ai_summary = await _generate_ai_summary(stats, user.id)
     
-    # 获取活跃目标
-    goals = _goals_db.get(user.id, [])
-    active_goals = [
-        GoalProgress(**g) for g in goals
-        if g["status"] == "active"
-    ]
+    # 调试信息插入到 ai_summary
+    last_msg = stats.last_active.strftime('%Y-%m-%d') if stats.last_active else "无记录"
+    status_hint = "由于最近一个月没有活跃，对齐天数已归零。发送一条新消息即可重新开始对齐！" if stats.streak_days == 0 else f"您已连续对齐 {stats.streak_days} 天。"
+    debug_info = f"[系统提醒] 历史数据已挂载：共 {stats.total_conversations} 个会话，{stats.total_messages} 条消息。最后活跃于 {last_msg}。{status_hint}"
+    ai_summary = f"{debug_info}\n\n{ai_summary}"
     
-    # 即将到来的里程碑 (模拟数据)
-    upcoming_milestones = [
-        {
-            "id": "ms_001",
-            "title": "完成 MVP 发布",
-            "goal_id": "goal_001",
-            "due_date": str(date.today() + timedelta(days=7)),
-            "progress": 80
+    # 2. 获取愿景数据
+    # 这里从配置或内存中获取真实愿景
+    if user.vision:
+        vision_title = user.vision.title
+        # 调用 AI 进行总结性描述，避免直接展示长篇画布
+        vision_desc = await _summarize_vision(user.vision.description)
+    else:
+        vision_title = ENDGAME_VISION.get("title", "成为 Level 5 自由人") if isinstance(ENDGAME_VISION, dict) else "终局愿景"
+        vision_desc = (ENDGAME_VISION.get("description", "通过构建 Endgame OS 实现完全的认知自由与生命掌控") 
+                      if isinstance(ENDGAME_VISION, dict) else ENDGAME_VISION)
+        # 即使是默认愿景，如果太长也总结一下
+        vision_desc = await _summarize_vision(vision_desc)
+    
+    # 计算愿景进度 (基于目标完成度)
+    vision_progress = int((stats.completed_goals / stats.total_goals) * 100) if stats.total_goals > 0 else 0
+    # 至少给 15% 的基础进度
+    vision_progress = max(15, vision_progress)
+
+    # 3. 派生最近活动
+    # 加载聊天消息作为活动
+    conversations = _load_json_data(CONVERSATIONS_FILE, {})
+    user_convs = [c for c in conversations.values() if c.get("user_id") == user.id]
+    
+    activities = []
+    
+    # 对话活动
+    for conv in sorted(user_convs, key=lambda x: x['updated_at'], reverse=True)[:5]:
+        activities.append(ActivityLog(
+            id=f"act_{conv['id']}",
+            user_id=user.id,
+            type=ActivityType.CHAT,
+            title="进行深度对话",
+            description=conv.get('title', '未命名会话'),
+            entity_id=conv['id'],
+            entity_type="conversation",
+            created_at=datetime.fromisoformat(conv['updated_at'])
+        ))
+        
+    # H3 校准活动
+    calibrations = db_manager.get_h3_calibrations(user.id, 5)
+    for cal in calibrations:
+        scores = cal['energy']
+        activities.append(ActivityLog(
+            id=f"act_{cal['id']}",
+            user_id=user.id,
+            type=ActivityType.CALIBRATION,
+            title="完成 H3 能量校准",
+            description=f"心智: {scores['mind']}, 身体: {scores['body']}, 精神: {scores['spirit']}, 志业: {scores['vocation']}",
+            entity_id=cal['id'],
+            entity_type="calibration",
+            created_at=datetime.fromisoformat(cal['created_at'])
+        ))
+        
+    # 按时间排序并取前 10
+    recent_activities = sorted(activities, key=lambda x: x.created_at, reverse=True)[:10]
+    
+    # 4. 获取活跃目标
+    service = get_memory_service()
+    goals = service.graph_store.get_nodes_by_type(user.id, MemoryType.GOAL.value)
+    active_goals = []
+    for g in goals:
+        dossier = g.get("dossier", {})
+        if dossier.get("status") == "active":
+            # 提取目标日期
+            target_date = None
+            if "target_date" in dossier:
+                try:
+                    target_date = date.fromisoformat(dossier["target_date"])
+                except:
+                    pass
+
+            active_goals.append(GoalProgress(
+                id=g["id"],
+                user_id=user.id,
+                title=g["name"],
+                description=g.get("content"),
+                status=GoalStatus.ACTIVE,
+                progress=dossier.get("progress", 0),
+                target_date=target_date,
+                created_at=datetime.fromisoformat(dossier.get("created_at", datetime.now().isoformat()))
+            ))
+    
+    return {
+        "stats": stats,
+        "recent_activities": recent_activities,
+        "active_goals": active_goals,
+        "upcoming_milestones": [],
+        "ai_summary": ai_summary,
+        "vision": {
+            "title": vision_title,
+            "description": vision_desc,
+            "progress": vision_progress
         }
-    ]
-    
-    return DashboardOverview(
-        stats=stats,
-        recent_activities=recent_activities,
-        active_goals=active_goals,
-        upcoming_milestones=upcoming_milestones
-    )
+    }
 
 
 @router.get("/stats", response_model=DashboardStats)
@@ -141,175 +385,35 @@ async def get_activities(
     user: User = Depends(require_user)
 ):
     """
-    获取活动日志列表
+    获取活动日志列表 (从真实数据派生)
     """
-    logs = _activity_logs_db.get(user.id, [])
+    # 复用 overview 中的逻辑，但支持过滤
+    overview = await get_dashboard_overview(user)
+    logs = overview.recent_activities
     
     # 过滤
     if types:
         type_list = [t.strip() for t in types.split(",")]
-        logs = [l for l in logs if l["type"] in type_list]
+        logs = [l for l in logs if l.type in type_list]
     
     if start_date:
-        logs = [
-            l for l in logs
-            if datetime.fromisoformat(l["created_at"]).date() >= start_date
-        ]
+        logs = [l for l in logs if l.created_at.date() >= start_date]
     
     if end_date:
-        logs = [
-            l for l in logs
-            if datetime.fromisoformat(l["created_at"]).date() <= end_date
-        ]
+        logs = [l for l in logs if l.created_at.date() <= end_date]
     
     # 排序和分页
-    sorted_logs = sorted(logs, key=lambda x: x["created_at"], reverse=True)
+    sorted_logs = sorted(logs, key=lambda x: x.created_at, reverse=True)
     paginated = sorted_logs[offset:offset + limit]
     
-    return [ActivityLog(**l) for l in paginated]
+    return paginated
 
 
-@router.post("/activities", response_model=ActivityLog)
-async def create_activity(
-    activity_type: ActivityType,
-    title: str,
-    description: Optional[str] = None,
-    entity_id: Optional[str] = None,
-    entity_type: Optional[str] = None,
-    user: User = Depends(require_user)
-):
-    """
-    创建活动日志
-    """
-    log = ActivityLog(
-        id=f"log_{uuid.uuid4().hex[:8]}",
-        user_id=user.id,
-        type=activity_type,
-        title=title,
-        description=description,
-        entity_id=entity_id,
-        entity_type=entity_type,
-        created_at=datetime.now()
-    )
-    
-    if user.id not in _activity_logs_db:
-        _activity_logs_db[user.id] = []
-    
-    _activity_logs_db[user.id].append(log.model_dump())
-    
-    return log
 
 
-@router.get("/goals", response_model=List[GoalProgress])
-async def get_goals(
-    status: Optional[GoalStatus] = None,
-    user: User = Depends(require_user)
-):
-    """
-    获取目标列表
-    """
-    goals = _goals_db.get(user.id, [])
-    
-    if status:
-        goals = [g for g in goals if g["status"] == status.value]
-    
-    return [GoalProgress(**g) for g in goals]
 
 
-@router.get("/goals/{goal_id}", response_model=GoalProgress)
-async def get_goal(
-    goal_id: str,
-    user: User = Depends(require_user)
-):
-    """
-    获取目标详情
-    """
-    goals = _goals_db.get(user.id, [])
-    
-    for goal in goals:
-        if goal["id"] == goal_id:
-            return GoalProgress(**goal)
-    
-    raise HTTPException(status_code=404, detail="目标不存在")
 
-
-@router.post("/goals", response_model=GoalProgress)
-async def create_goal(
-    title: str,
-    description: Optional[str] = None,
-    target_date: Optional[date] = None,
-    parent_goal_id: Optional[str] = None,
-    tags: List[str] = [],
-    user: User = Depends(require_user)
-):
-    """
-    创建新目标
-    """
-    goal = GoalProgress(
-        id=f"goal_{uuid.uuid4().hex[:8]}",
-        user_id=user.id,
-        title=title,
-        description=description,
-        status=GoalStatus.ACTIVE,
-        progress=0,
-        start_date=date.today(),
-        target_date=target_date,
-        parent_goal_id=parent_goal_id,
-        tags=tags,
-        created_at=datetime.now(),
-        updated_at=datetime.now()
-    )
-    
-    if user.id not in _goals_db:
-        _goals_db[user.id] = []
-    
-    _goals_db[user.id].append(goal.model_dump())
-    
-    # 记录活动
-    await create_activity(
-        activity_type=ActivityType.GOAL_UPDATE,
-        title=f"创建目标: {title}",
-        entity_id=goal.id,
-        entity_type="goal",
-        user=user
-    )
-    
-    return goal
-
-
-@router.patch("/goals/{goal_id}", response_model=GoalProgress)
-async def update_goal(
-    goal_id: str,
-    title: Optional[str] = None,
-    description: Optional[str] = None,
-    status: Optional[GoalStatus] = None,
-    progress: Optional[float] = None,
-    user: User = Depends(require_user)
-):
-    """
-    更新目标
-    """
-    goals = _goals_db.get(user.id, [])
-    
-    for i, goal in enumerate(goals):
-        if goal["id"] == goal_id:
-            if title is not None:
-                goal["title"] = title
-            if description is not None:
-                goal["description"] = description
-            if status is not None:
-                goal["status"] = status.value
-                if status == GoalStatus.COMPLETED:
-                    goal["completed_at"] = datetime.now().isoformat()
-            if progress is not None:
-                goal["progress"] = progress
-            
-            goal["updated_at"] = datetime.now().isoformat()
-            _goals_db[user.id][i] = goal
-            
-            return GoalProgress(**goal)
-    
-    raise HTTPException(status_code=404, detail="目标不存在")
 
 
 @router.get("/timeline")

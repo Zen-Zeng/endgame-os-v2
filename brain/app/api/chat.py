@@ -32,10 +32,26 @@ memory_service = get_memory_service()
 endgame_graph = create_endgame_graph()
 
 
-# ============ 模拟数据存储 (暂时保留用于会话元数据，后续应迁移至数据库) ============
+# ============ 数据存储 (JSON 持久化) ============
+from ..core.config import DATA_DIR
 
-_conversations_db: dict[str, dict] = {}
-_messages_db: dict[str, List[dict]] = {}
+CONVERSATIONS_FILE = DATA_DIR / "conversations.json"
+MESSAGES_FILE = DATA_DIR / "messages.json"
+
+def _load_data(file_path, default_value):
+    if file_path.exists():
+        try:
+            return json.loads(file_path.read_text(encoding='utf-8'))
+        except:
+            return default_value
+    return default_value
+
+def _save_data(file_path, data):
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+
+_conversations_db: dict[str, dict] = _load_data(CONVERSATIONS_FILE, {})
+_messages_db: dict[str, List[dict]] = _load_data(MESSAGES_FILE, {})
 
 
 # ============ Request Models ============
@@ -60,6 +76,11 @@ def _create_conversation(user_id: str, title: Optional[str] = None) -> Conversat
     )
     _conversations_db[conv_id] = conv.model_dump(mode='json')
     _messages_db[conv_id] = []
+    
+    # 保存数据
+    _save_data(CONVERSATIONS_FILE, _conversations_db)
+    _save_data(MESSAGES_FILE, _messages_db)
+    
     return conv
 
 
@@ -91,6 +112,9 @@ def _add_message(
         conv["message_count"] = len(_messages_db[conversation_id])
         conv["updated_at"] = datetime.now().isoformat()
         conv["last_message_at"] = datetime.now().isoformat()
+        _save_data(CONVERSATIONS_FILE, _conversations_db)
+    
+    _save_data(MESSAGES_FILE, _messages_db)
     
     return msg
 
@@ -111,70 +135,103 @@ async def _generate_ai_response(
     try:
         logger.info(f"开始通过工作流生成响应，会话: {conversation_id}")
         
-        # 转换历史消息为 LangChain 格式
+        # 转换历史消息为 LangChain 格式，并注入时间戳以解决时间混乱问题
         history = []
-        for msg in messages[:-1]:  # 排除最后一条（当前输入）
+        last_date = None
+        for msg in messages[:-1]:
             role = msg.get("role", "")
             content = msg.get("content", "")
+            created_at = msg.get("created_at")
+            
+            # 格式化时间戳
+            time_str = ""
+            if created_at:
+                if isinstance(created_at, str):
+                    try:
+                        dt = datetime.fromisoformat(created_at)
+                        curr_date = dt.strftime("%Y-%m-%d")
+                        # 如果日期变更，添加日期分割线
+                        if curr_date != last_date:
+                            history.append(SystemMessage(content=f"--- 日期变更: {curr_date} ---"))
+                            last_date = curr_date
+                        time_str = f"[{dt.strftime('%H:%M')}] "
+                    except: pass
+                elif isinstance(created_at, datetime):
+                    curr_date = created_at.strftime("%Y-%m-%d")
+                    if curr_date != last_date:
+                        history.append(SystemMessage(content=f"--- 日期变更: {curr_date} ---"))
+                        last_date = curr_date
+                    time_str = f"[{created_at.strftime('%H:%M')}] "
+            
+            # 注入时间信息到内容中，帮助模型建立时间轴
             if role == "user":
-                history.append(HumanMessage(content=content))
+                history.append(HumanMessage(content=f"{time_str}{content}"))
             elif role == "assistant":
-                history.append(AIMessage(content=content))
+                history.append(AIMessage(content=f"{time_str}{content}"))
         
         last_user_message = messages[-1].get("content", "")
+        # 同样为当前消息添加时间
+        current_time_str = f"[{datetime.now().strftime('%H:%M')}] "
+        history.append(HumanMessage(content=f"{current_time_str}{last_user_message}"))
         
         # 准备初始状态
         initial_state = {
-            "messages": history + [HumanMessage(content=last_user_message)],
+            "user_id": user.id,
+            "messages": history, # 已经包含了最后一条
             "h3_state": user.h3_state.model_dump() if hasattr(user, 'h3_state') else {"mind": 5, "body": 5, "spirit": 5, "vocation": 5},
+            "persona": user.persona,
+            "vision": user.vision,
             "context": "",
-            "memory_query": last_user_message,
+            "current_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "alignment_score": 0.0,
             "next_step": "retrieve"
         }
         
         # 运行工作流并流式获取事件
-        # 注意：这里我们使用 astream 模式来获取节点运行信息
-        chunk_count = 0
         full_ai_content = ""
         
-        async for event in endgame_graph.astream(initial_state, config={"configurable": {"thread_id": conversation_id}}):
-            # 检查是否有消息更新（通常来自 architect 节点）
-            if "architect" in event:
-                node_output = event["architect"]
-                if "messages" in node_output and node_output["messages"]:
-                    new_msg = node_output["messages"][-1]
-                    content = new_msg.content
-                    
-                    # 为了模拟流式效果（因为 invoke/node 通常是一次性返回），
-                    # 我们将内容切分并 yield。
-                    # 未来如果 architect 节点支持内部流式，这里可以更精细。
-                    words = content.split(' ')
-                    for i, word in enumerate(words):
-                        space = ' ' if i < len(words) - 1 else ''
-                        yield word + space
-                        full_ai_content += word + space
-                        await asyncio.sleep(0.01) # 微小延迟模拟流式
-            
-            # 可以在这里 yield 节点状态更新，例如“正在检索记忆...”、“正在分析目标对齐...”
-            elif "retrieve_memory" in event:
-                # yield "\n[系统：正在检索相关记忆...]\n"
-                pass
-            elif "check_alignment" in event:
-                alignment = event["check_alignment"]
-                score = alignment.get("alignment_score", 0.5)
-                # if score < 0.4:
-                #     yield f"\n[警示：当前讨论内容与终局愿景对齐度较低 ({score})]\n"
+        try:
+            async for event in endgame_graph.astream(initial_state, config={"configurable": {"thread_id": conversation_id}}):
+                logger.info(f"工作流事件: {list(event.keys())}")
+                # 检查是否有消息更新（通常来自 architect 节点）
+                if "architect" in event:
+                    node_output = event["architect"]
+                    if "messages" in node_output and node_output["messages"]:
+                        new_msg = node_output["messages"][-1]
+                        content = new_msg.content
+                        
+                        # 只有当新内容比已发送内容长时才发送增量 (LangGraph 状态是累积的)
+                        if content and len(content) > len(full_ai_content):
+                            new_content = content[len(full_ai_content):]
+                            logger.info(f"Architect生成新内容: {new_content[:50]}...")
+                            
+                            # 改进流式 yield 逻辑，支持中文
+                            chunk_size = 2 if any('\u4e00' <= char <= '\u9fff' for char in new_content) else 5
+                            for i in range(0, len(new_content), chunk_size):
+                                chunk = new_content[i:i+chunk_size]
+                                yield chunk
+                                full_ai_content += chunk
+                                await asyncio.sleep(0.01) # 稍微延迟模拟真实感
+                
+                elif "check_alignment" in event:
+                    alignment = event["check_alignment"]
+                    score = alignment.get("alignment_score", 0.5)
+                    logger.info(f"对齐检查分数: {score}")
+        except Exception as graph_err:
+            logger.error(f"图执行内部错误: {graph_err}", exc_info=True)
+            yield f"\n[思考中断: {str(graph_err)}]"
 
-        # 处理完成后，将对话存入记忆图谱
+        # 处理完成后，将对话存入记忆（包含向量库和图谱提取）
         if full_ai_content:
-            # 异步存入，不阻塞响应
-            asyncio.create_task(asyncio.to_thread(
-                memory_service.graph_store.add_log,
-                log_id=f"chat_{uuid.uuid4().hex[:6]}",
-                content=f"User: {last_user_message}\nAI: {full_ai_content}",
-                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                log_type="chat_history"
-            ))
+            # 异步处理记忆提取，不阻塞响应
+            asyncio.create_task(
+                memory_service.process_chat_interaction(
+                    user_id=user.id,
+                    conversation_id=conversation_id,
+                    user_message=last_user_message,
+                    ai_response=full_ai_content
+                )
+            )
 
     except Exception as e:
         logger.error(f"工作流执行出错: {str(e)}", exc_info=True)
@@ -240,6 +297,16 @@ async def send_message(
                 created_at=datetime.now()
             )
             _messages_db[conversation_id].append(ai_msg.model_dump(mode='json'))
+            
+            # 更新会话元数据并保存
+            if conversation_id in _conversations_db:
+                conv = _conversations_db[conversation_id]
+                conv["message_count"] = len(_messages_db[conversation_id])
+                conv["updated_at"] = datetime.now().isoformat()
+                conv["last_message_at"] = datetime.now().isoformat()
+                _save_data(CONVERSATIONS_FILE, _conversations_db)
+            
+            _save_data(MESSAGES_FILE, _messages_db)
             
             # 发送完成标记
             yield f"data: {json.dumps({'type': 'done', 'message': ai_msg.model_dump(mode='json')})}\n\n"
@@ -352,6 +419,9 @@ async def delete_conversation(
     if conversation_id in _messages_db:
         del _messages_db[conversation_id]
     
+    _save_data(CONVERSATIONS_FILE, _conversations_db)
+    _save_data(MESSAGES_FILE, _messages_db)
+    
     return {"message": "会话已删除"}
 
 
@@ -372,6 +442,7 @@ async def archive_conversation(
     
     conv_data["is_archived"] = True
     _conversations_db[conversation_id] = conv_data
+    _save_data(CONVERSATIONS_FILE, _conversations_db)
     
     return {"message": "会话已归档"}
 

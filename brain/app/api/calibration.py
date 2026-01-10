@@ -11,6 +11,7 @@ import uuid
 from ..models.h3 import H3Energy, H3CalibrationRequest
 from ..models.user import User
 from .auth import require_user
+from ..core.db import db_manager
 
 router = APIRouter()
 
@@ -127,15 +128,27 @@ async def morning_wake(user: User = Depends(require_user)):
         }
     }
     
-    # H3 状态 (TODO: 从实际数据获取)
-    h3_status = {
-        "mind": 60,
-        "body": 55,
-        "spirit": 65,
-        "vocation": 58,
-        "total": 60,
-        "trend": "stable"
-    }
+    # 获取最新 H3 状态
+    h3_history = db_manager.get_h3_energy_history(user.id, 1)
+    if h3_history:
+        h3 = h3_history[0]
+        h3_status = {
+            "mind": h3.get("mind", 50),
+            "body": h3.get("body", 50),
+            "spirit": h3.get("spirit", 50),
+            "vocation": h3.get("vocation", 50),
+            "total": sum([h3.get(k, 50) for k in ["mind", "body", "spirit", "vocation"]]) // 4,
+            "trend": "stable"
+        }
+    else:
+        h3_status = {
+            "mind": 50,
+            "body": 50,
+            "spirit": 50,
+            "vocation": 50,
+            "total": 50,
+            "trend": "stable"
+        }
     
     # 今日聚焦建议
     today_focus = [

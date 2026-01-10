@@ -8,7 +8,8 @@ from typing import Optional, List
 from datetime import datetime
 
 from ..models.user import User, PersonaConfig, PersonaTone
-from .auth import require_user
+from .auth import require_user, _users_db
+from ..core.db import db_manager
 
 router = APIRouter()
 
@@ -32,11 +33,6 @@ class PersonaPreview(BaseModel):
     sample_question: str
     sample_challenge: str
     tone_description: str
-
-
-# ============ 模拟数据存储 ============
-
-_persona_db: dict[str, dict] = {}  # user_id -> PersonaConfig
 
 
 # ============ 预设人格模板 ============
@@ -70,6 +66,14 @@ PERSONA_TEMPLATES = {
 
 
 # ============ 辅助函数 ============
+
+def _get_user_persona(user_id: str, default_persona: PersonaConfig) -> PersonaConfig:
+    """获取用户人格配置，优先从数据库获取"""
+    config_data = db_manager.get_persona_config(user_id)
+    if config_data:
+        return PersonaConfig(**config_data)
+    return default_persona
+
 
 def _get_tone_samples(tone: PersonaTone) -> dict:
     """获取语气示例"""
@@ -138,9 +142,7 @@ async def get_current_persona(user: User = Depends(require_user)):
     """
     获取当前人格配置
     """
-    if user.id in _persona_db:
-        return PersonaConfig(**_persona_db[user.id])
-    return user.persona
+    return _get_user_persona(user.id, user.persona)
 
 
 @router.put("/current", response_model=PersonaConfig)
@@ -151,15 +153,26 @@ async def update_persona(
     """
     更新人格配置
     """
-    current = _persona_db.get(user.id, user.persona.model_dump())
+    current_persona = _get_user_persona(user.id, user.persona)
+    current_dict = current_persona.model_dump()
     
     update_dict = request.model_dump(exclude_unset=True)
     for key, value in update_dict.items():
         if value is not None:
-            current[key] = value
+            current_dict[key] = value
     
-    _persona_db[user.id] = current
-    return PersonaConfig(**current)
+    # 持久化保存
+    db_manager.save_persona_config(user.id, current_dict)
+    
+    # 同步到 auth._users_db
+    if user.id in _users_db:
+        _users_db[user.id]["persona"] = current_dict
+        # user_service 已经在 auth.py 的 PATCH 端点逻辑中负责保存，
+        # 但这里是独立的 PUT /persona/current 端点，也需要保存。
+        from ..services.user.user_service import user_service
+        user_service.update_user(user.id, _users_db[user.id])
+        
+    return PersonaConfig(**current_dict)
 
 
 @router.get("/preview", response_model=PersonaPreview)
@@ -215,7 +228,8 @@ async def apply_template(
         traits=template["traits"]
     )
     
-    _persona_db[user.id] = config.model_dump()
+    # 持久化保存
+    db_manager.save_persona_config(user.id, config.model_dump())
     
     return config
 
@@ -225,7 +239,7 @@ async def get_system_prompt(user: User = Depends(require_user)):
     """
     获取当前系统提示词
     """
-    config = PersonaConfig(**_persona_db.get(user.id, user.persona.model_dump()))
+    config = _get_user_persona(user.id, user.persona)
     prompt = _generate_system_prompt(config, user)
     
     return {
@@ -242,7 +256,7 @@ async def test_interaction(
     """
     测试人格交互（用于配置时预览）
     """
-    config = PersonaConfig(**_persona_db.get(user.id, user.persona.model_dump()))
+    config = _get_user_persona(user.id, user.persona)
     samples = _get_tone_samples(config.tone)
     
     # 简单模拟响应

@@ -18,6 +18,8 @@ import {
 } from 'lucide-react';
 import { useAuthStore } from '../stores/useAuthStore';
 import { useOnboardingStore } from '../stores/useOnboardingStore';
+import GlassCard from '../components/layout/GlassCard';
+import Button from '../components/ui/Button';
 import clsx from 'clsx';
 
 // 检查浏览器是否支持 WebAuthn
@@ -113,60 +115,46 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="login-page">
-      {/* 背景动效 */}
-      <div className="login-background">
-        <div className="login-gradient" />
-        <div className="login-orb login-orb-1" />
-        <div className="login-orb login-orb-2" />
-        <div className="login-orb login-orb-3" />
-        <div className="login-grid" />
-      </div>
+    <div className="min-h-screen flex bg-[var(--md-sys-color-background)] overflow-hidden relative">
+      {/* 动态背景装饰 */}
+      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-[var(--md-sys-color-primary)] opacity-10 blur-[120px] rounded-full animate-pulse" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-[var(--md-sys-color-secondary)] opacity-10 blur-[120px] rounded-full" />
 
-      {/* 左侧品牌区域 */}
-      <div className="login-brand">
-        <div className="login-brand-content">
-          <div className="login-logo animate-fade-in-up">
-            <div className="login-logo-icon">
-              <Sparkles size={32} className="text-white" />
+      {/* 左侧展示区域 - 仅在桌面端显示 */}
+      <div className="hidden lg:flex lg:w-1/2 flex-col justify-center px-20 relative z-10 border-r border-[var(--md-sys-color-outline-variant)]">
+        <div className="max-w-lg">
+          <div className="mb-12 relative inline-block">
+            <div className="w-20 h-20 rounded-3xl bg-[var(--md-sys-color-primary)] flex items-center justify-center shadow-2xl shadow-[var(--md-sys-color-primary)]/20">
+              <Sparkles size={40} className="text-white" />
             </div>
-            <div className="login-logo-glow" />
+            <div className="absolute -inset-4 bg-[var(--md-sys-color-primary)] opacity-20 blur-2xl rounded-full -z-10" />
           </div>
           
-          <h1 className="login-title animate-fade-in-up delay-100">
-            Endgame OS
+          <h1 className="text-7xl font-black tracking-tighter text-[var(--md-sys-color-on-background)] mb-6 leading-tight">
+            Endgame <span className="text-[var(--md-sys-color-primary)]">OS</span>
           </h1>
           
-          <p className="login-tagline animate-fade-in-up delay-200">
-            你的数字分身，帮助你保持对终局愿景的聚焦
+          <p className="text-xl text-[var(--md-sys-color-on-surface-variant)] opacity-70 mb-12 max-w-md leading-relaxed">
+            你的数字分身，帮助你保持对终局愿景的聚焦。
           </p>
           
-          <div className="login-features animate-fade-in-up delay-300">
-            <div className="login-feature">
-              <div className="login-feature-icon">
-                <Shield size={20} />
+          <div className="space-y-6">
+            <div className="flex items-center gap-6 p-4 rounded-2xl border border-[var(--md-sys-color-outline-variant)] bg-[var(--md-sys-color-surface-container-low)]/50">
+              <div className="w-12 h-12 rounded-xl bg-[var(--md-sys-color-primary-container)] flex items-center justify-center text-[var(--md-sys-color-on-primary-container)]">
+                <Shield size={24} />
               </div>
-              <div className="login-feature-text">
-                <span className="login-feature-title">H3 能量系统</span>
-                <span className="login-feature-desc">四维能量监控</span>
-              </div>
-            </div>
-            <div className="login-feature">
-              <div className="login-feature-icon">
-                <Sparkles size={20} />
-              </div>
-              <div className="login-feature-text">
-                <span className="login-feature-title">AI 数字分身</span>
-                <span className="login-feature-desc">个性化智能对话</span>
+              <div>
+                <h3 className="font-bold text-[var(--md-sys-color-on-surface)]">H3 能量系统</h3>
+                <p className="text-sm opacity-60">四维能量平衡与监控</p>
               </div>
             </div>
-            <div className="login-feature">
-              <div className="login-feature-icon">
-                <ScanFace size={20} />
+            <div className="flex items-center gap-6 p-4 rounded-2xl border border-[var(--md-sys-color-outline-variant)] bg-[var(--md-sys-color-surface-container-low)]/50">
+              <div className="w-12 h-12 rounded-xl bg-[var(--md-sys-color-secondary-container)] flex items-center justify-center text-[var(--md-sys-color-on-secondary-container)]">
+                <Sparkles size={24} />
               </div>
-              <div className="login-feature-text">
-                <span className="login-feature-title">记忆图谱</span>
-                <span className="login-feature-desc">长期知识沉淀</span>
+              <div>
+                <h3 className="font-bold text-[var(--md-sys-color-on-surface)]">AI 数字分身</h3>
+                <p className="text-sm opacity-60">个性化心智成长模型</p>
               </div>
             </div>
           </div>
@@ -174,63 +162,63 @@ export default function LoginPage() {
       </div>
 
       {/* 右侧表单区域 */}
-      <div className="login-form-area">
-        <div className="login-form-container animate-fade-in">
+      <div className="flex-1 flex items-center justify-center p-6 relative z-10">
+        <div className="w-full max-w-[440px]">
           {/* 移动端 Logo */}
-          <div className="login-mobile-logo">
-            <div className="login-logo-icon login-logo-icon-sm">
+          <div className="lg:hidden flex items-center gap-4 justify-center mb-12">
+            <div className="w-12 h-12 rounded-2xl bg-[var(--md-sys-color-primary)] flex items-center justify-center">
               <Sparkles size={24} className="text-white" />
             </div>
-            <h1 className="login-mobile-title">Endgame OS</h1>
+            <h1 className="text-3xl font-black tracking-tighter">Endgame OS</h1>
           </div>
 
-          {/* 表单卡片 */}
-          <div className="login-card">
-            <div className="login-card-header">
-              <h2 className="login-card-title">
+          <GlassCard className="p-10 border-[var(--md-sys-color-outline-variant)]">
+            <div className="text-center mb-10">
+              <h2 className="text-3xl font-black tracking-tighter mb-2 text-[var(--md-sys-color-on-surface)]">
                 {isRegister ? '创建账号' : '欢迎回来'}
               </h2>
-              <p className="login-card-subtitle">
+              <p className="text-[var(--md-sys-color-on-surface-variant)] opacity-60 uppercase text-xs tracking-widest font-bold">
                 {isRegister ? '开启你的终局之旅' : '继续你的终局之旅'}
               </p>
             </div>
 
             {/* 生物识别登录 */}
             {biometricSupported && !isRegister && (
-              <div className="login-biometric">
+              <div className="mb-8">
                 <button
                   onClick={handleBiometricLogin}
                   disabled={biometricLoading}
-                  className="login-biometric-btn"
+                  className="w-full flex items-center justify-center gap-3 py-4 rounded-2xl border border-[var(--md-sys-color-outline-variant)] bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface)] font-bold transition-all hover:bg-[var(--md-sys-color-surface-container-highest)]"
                 >
                   {biometricLoading ? (
                     <Loader2 size={24} className="animate-spin" />
                   ) : (
-                    <Fingerprint size={24} />
+                    <Fingerprint size={24} className="text-[var(--md-sys-color-primary)]" />
                   )}
                   <span>使用生物识别登录</span>
                 </button>
-                <div className="login-divider">
-                  <span>或使用密码登录</span>
+                <div className="flex items-center gap-4 my-6">
+                  <div className="h-[1px] flex-1 bg-[var(--md-sys-color-outline-variant)]" />
+                  <span className="text-xs font-bold opacity-30 uppercase tracking-tighter">OR</span>
+                  <div className="h-[1px] flex-1 bg-[var(--md-sys-color-outline-variant)]" />
                 </div>
               </div>
             )}
 
             {/* 错误提示 */}
             {error && (
-              <div className="login-error animate-fade-in">
+              <div className="mb-6 p-4 rounded-xl bg-[var(--md-sys-color-error-container)] text-[var(--md-sys-color-on-error-container)] text-sm font-medium animate-shake">
                 {error}
               </div>
             )}
 
-            <form onSubmit={handleSubmit} className="login-form">
-              {/* 用户名（仅注册） */}
+            <form onSubmit={handleSubmit} className="space-y-6">
               {isRegister && (
-                <div className="form-group animate-fade-in-up">
-                  <label className="form-label">用户名</label>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">用户名</label>
                   <input
                     type="text"
-                    className="form-input"
+                    className="w-full px-5 py-4 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] border border-transparent focus:border-[var(--md-sys-color-primary)] outline-none transition-all text-[var(--md-sys-color-on-surface)]"
                     placeholder="你的名字"
                     value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
@@ -239,14 +227,13 @@ export default function LoginPage() {
                 </div>
               )}
 
-              {/* 邮箱 */}
-              <div className="form-group">
-                <label className="form-label">邮箱</label>
-                <div className="form-input-wrapper">
-                  <Mail className="form-input-icon" size={20} />
+              <div className="space-y-2">
+                <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">邮箱</label>
+                <div className="relative">
+                  <Mail className="absolute left-5 top-1/2 -translate-y-1/2 opacity-30" size={20} />
                   <input
                     type="email"
-                    className="form-input form-input-with-icon"
+                    className="w-full pl-14 pr-5 py-4 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] border border-transparent focus:border-[var(--md-sys-color-primary)] outline-none transition-all text-[var(--md-sys-color-on-surface)]"
                     placeholder="your@email.com"
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
@@ -255,14 +242,13 @@ export default function LoginPage() {
                 </div>
               </div>
 
-              {/* 密码 */}
-              <div className="form-group">
-                <label className="form-label">密码</label>
-                <div className="form-input-wrapper">
-                  <Lock className="form-input-icon" size={20} />
+              <div className="space-y-2">
+                <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">密码</label>
+                <div className="relative">
+                  <Lock className="absolute left-5 top-1/2 -translate-y-1/2 opacity-30" size={20} />
                   <input
                     type={showPassword ? 'text' : 'password'}
-                    className="form-input form-input-with-icon"
+                    className="w-full pl-14 pr-14 py-4 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] border border-transparent focus:border-[var(--md-sys-color-primary)] outline-none transition-all text-[var(--md-sys-color-on-surface)]"
                     placeholder="••••••••"
                     value={formData.password}
                     onChange={(e) => setFormData({ ...formData, password: e.target.value })}
@@ -271,50 +257,39 @@ export default function LoginPage() {
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
-                    className="form-input-action"
+                    className="absolute right-5 top-1/2 -translate-y-1/2 opacity-30 hover:opacity-100 transition-opacity"
                   >
                     {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
                   </button>
                 </div>
               </div>
 
-              {/* 提交按钮 */}
-              <button
+              <Button
                 type="submit"
-                disabled={isLoading}
-                className="login-submit-btn"
+                loading={isLoading}
+                className="w-full py-8 text-lg font-black tracking-tighter rounded-2xl shadow-xl shadow-[var(--md-sys-color-primary)]/20"
               >
-                {isLoading ? (
-                  <>
-                    <Loader2 className="animate-spin" size={20} />
-                    处理中...
-                  </>
-                ) : (
-                  <>
-                    {isRegister ? '创建账号' : '登录'}
-                    <ArrowRight size={20} />
-                  </>
-                )}
-              </button>
+                {isRegister ? '创建账号' : '登录系统'}
+                {!isLoading && <ArrowRight size={20} className="ml-2" />}
+              </Button>
             </form>
 
-            {/* 切换登录/注册 */}
-            <div className="login-switch">
+            <div className="mt-8 text-center">
               <button
                 type="button"
                 onClick={() => {
                   setIsRegister(!isRegister);
                   clearError();
                 }}
-                className="login-switch-btn"
+                className="text-sm font-bold opacity-50 hover:opacity-100 hover:text-[var(--md-sys-color-primary)] transition-all uppercase tracking-widest"
               >
                 {isRegister ? '已有账号？立即登录' : '没有账号？立即注册'}
               </button>
             </div>
-          </div>
+          </GlassCard>
 
-          {/* 底部信息 */}
-          <p className="login-footer">
+          <p className="mt-8 text-center text-xs opacity-30 font-medium">
+            ENDGAME OS V2.0 &copy; 2026<br/>
             继续即表示你同意我们的服务条款和隐私政策
           </p>
         </div>

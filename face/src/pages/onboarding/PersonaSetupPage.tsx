@@ -23,6 +23,8 @@ import { useOnboardingStore } from '../../stores/useOnboardingStore';
 import type { PersonaConfig } from '../../stores/useOnboardingStore';
 import { useAuthStore } from '../../stores/useAuthStore';
 import { api } from '../../lib/api';
+import GlassCard from '../../components/layout/GlassCard';
+import Button from '../../components/ui/Button';
 import clsx from 'clsx';
 
 // 默认 AI 人格选项
@@ -97,37 +99,18 @@ export default function PersonaSetupPage() {
         const formDataUpload = new FormData();
         formDataUpload.append('file', file);
         
-        // 1. 上传文件到后端
-        const uploadResponse = await fetch('/api/upload', {
-          method: 'POST',
-          body: formDataUpload,
-        });
-        
-        if (!uploadResponse.ok) {
-          throw new Error('上传失败');
-        }
-        
-        const uploadResult = await uploadResponse.json();
+        // 1. 上传文件到后端 (会自动触发记忆摄取任务)
+        // 返回 ArchiveFile 对象，包含 stored_name (filename)
+        const uploadResult = await api.post<any>('/archives/upload', formDataUpload);
         
         // 2. 更新状态为处理中
         setUploadedFiles(prev =>
           prev.map(f => f.id === fileId ? { ...f, status: 'processing' } : f)
         );
         
-        // 3. 触发记忆训练（将文件内容导入知识图谱）
-        const trainResponse = await fetch('/api/train', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            file_paths: [uploadResult.file_path],
-          }),
-        });
-        
-        if (!trainResponse.ok) {
-          console.warn('记忆训练失败，但文件已上传');
-        }
+        // 3. 模拟等待处理完成 (实际处理在后台进行)
+        // 如果需要精确状态，应该轮询 /archives/files/{id} 查看 is_processed 字段
+        await new Promise(resolve => setTimeout(resolve, 1500));
 
         setUploadedFiles(prev =>
           prev.map(f => f.id === fileId ? { ...f, status: 'done' } : f)
@@ -252,257 +235,245 @@ export default function PersonaSetupPage() {
   };
 
   return (
-    <div className="onboarding-page">
-      <div className="onboarding-background">
-        <div className="onboarding-gradient" />
-        <div className="onboarding-orb onboarding-orb-1" />
-        <div className="onboarding-orb onboarding-orb-2" />
+    <div className="min-h-screen bg-[var(--md-sys-color-background)] flex flex-col p-6 lg:p-12 relative overflow-hidden">
+      {/* 装饰背景 */}
+      <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-[var(--md-sys-color-primary)] opacity-5 blur-[120px] rounded-full -z-10" />
+      <div className="absolute bottom-0 left-0 w-[500px] h-[500px] bg-[var(--md-sys-color-secondary)] opacity-5 blur-[120px] rounded-full -z-10" />
+
+      {/* 顶部导航 */}
+      <div className="max-w-4xl mx-auto w-full flex justify-between items-center mb-12">
+        <div className="flex items-center gap-4">
+          <div className="w-10 h-10 rounded-xl bg-[var(--md-sys-color-primary)] flex items-center justify-center text-white">
+            <Sparkles size={24} />
+          </div>
+          <h1 className="text-2xl font-black tracking-tighter">人格设定</h1>
+        </div>
+        
+        {/* 进度指示器 */}
+        <div className="flex items-center gap-2">
+          {Array.from({ length: totalSteps }).map((_, i) => (
+            <div 
+              key={i} 
+              className={clsx(
+                "h-1.5 rounded-full transition-all duration-500",
+                i + 1 === step ? "w-8 bg-[var(--md-sys-color-primary)]" : 
+                i + 1 < step ? "w-4 bg-[var(--md-sys-color-primary)] opacity-30" : "w-4 bg-[var(--md-sys-color-outline-variant)]"
+              )}
+            />
+          ))}
+        </div>
       </div>
 
-      <div className="onboarding-container">
-        {/* 进度指示器 */}
-        <div className="onboarding-progress">
-          <div className="onboarding-progress-bar">
-            <div 
-              className="onboarding-progress-fill" 
-              style={{ width: `${(step / totalSteps) * 100}%` }}
-            />
-          </div>
-          <span className="onboarding-progress-text">步骤 {step} / {totalSteps}</span>
-        </div>
-
-        {/* 步骤内容 */}
-        <div className="onboarding-content">
-          {/* 步骤 1: 基本信息 */}
+      <main className="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-center">
+        <GlassCard className="p-10 border-[var(--md-sys-color-outline-variant)]">
+          {/* 步骤内容渲染 */}
           {step === 1 && (
-            <div className="onboarding-step animate-fade-in-up">
-              <div className="onboarding-icon">
-                <User size={32} />
+            <div className="animate-fade-in space-y-8">
+              <div className="text-center max-w-lg mx-auto mb-10">
+                <h2 className="text-4xl font-black tracking-tighter mb-4">基本信息</h2>
+                <p className="text-[var(--md-sys-color-on-surface-variant)] opacity-60">定义你和你的数字分身如何互相称呼。</p>
               </div>
-              <h1 className="onboarding-title">让我们认识一下</h1>
-              <p className="onboarding-desc">
-                告诉我你希望如何被称呼，以及你想给你的 AI 分身起什么名字
-              </p>
-
-              <div className="onboarding-form">
-                <div className="form-group">
-                  <label className="form-label">你希望 AI 如何称呼你？</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="例如：小明、Alex"
-                    value={formData.nickname}
-                    onChange={(e) => setFormData({ ...formData, nickname: e.target.value })}
-                  />
+              
+              <div className="grid md:grid-cols-2 gap-8">
+                <div className="space-y-3">
+                  <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">你的称呼</label>
+                  <div className="relative">
+                    <User className="absolute left-5 top-1/2 -translate-y-1/2 opacity-30" size={20} />
+                    <input
+                      type="text"
+                      className="w-full pl-14 pr-5 py-4 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] border border-transparent focus:border-[var(--md-sys-color-primary)] outline-none transition-all"
+                      value={formData.nickname}
+                      onChange={(e) => setFormData({ ...formData, nickname: e.target.value })}
+                      placeholder="例如：岳"
+                    />
+                  </div>
                 </div>
-
-                <div className="form-group">
-                  <label className="form-label">给你的 AI 分身起个名字</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="例如：The Architect、小助手"
-                    value={formData.aiName}
-                    onChange={(e) => setFormData({ ...formData, aiName: e.target.value })}
-                  />
-                  <p className="form-hint">这将是你数字分身的名字</p>
+                <div className="space-y-3">
+                  <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">AI 分身名称</label>
+                  <div className="relative">
+                    <Brain className="absolute left-5 top-1/2 -translate-y-1/2 opacity-30" size={20} />
+                    <input
+                      type="text"
+                      className="w-full pl-14 pr-5 py-4 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] border border-transparent focus:border-[var(--md-sys-color-primary)] outline-none transition-all"
+                      value={formData.aiName}
+                      onChange={(e) => setFormData({ ...formData, aiName: e.target.value })}
+                      placeholder="例如：The Architect"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
           )}
 
-          {/* 步骤 2: AI 人格 */}
           {step === 2 && (
-            <div className="onboarding-step animate-fade-in-up">
-              <div className="onboarding-icon">
-                <Sparkles size={32} />
+            <div className="animate-fade-in space-y-8">
+              <div className="text-center max-w-lg mx-auto mb-10">
+                <h2 className="text-4xl font-black tracking-tighter mb-4">性格底色</h2>
+                <p className="text-[var(--md-sys-color-on-surface-variant)] opacity-60">选择一个最能产生共鸣的交互风格。</p>
               </div>
-              <h1 className="onboarding-title">选择 AI 人格</h1>
-              <p className="onboarding-desc">
-                选择一种与你最契合的 AI 人格风格
-              </p>
 
-              <div className="personality-grid">
-                {personalityPresets.map((preset) => (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {personalityPresets.map((p) => (
                   <button
-                    key={preset.id}
-                    onClick={() => handlePersonalitySelect(preset.id)}
+                    key={p.id}
+                    onClick={() => handlePersonalitySelect(p.id)}
                     className={clsx(
-                      'personality-card',
-                      formData.selectedPersonality === preset.id && 'personality-card-active'
+                      "p-6 rounded-2xl border text-left transition-all group",
+                      formData.selectedPersonality === p.id 
+                        ? "bg-[var(--md-sys-color-primary-container)] border-[var(--md-sys-color-primary)]" 
+                        : "bg-[var(--md-sys-color-surface-container-low)] border-[var(--md-sys-color-outline-variant)] hover:bg-[var(--md-sys-color-surface-container-high)]"
                     )}
                   >
-                    <span className="personality-name">{preset.name}</span>
-                    <span className="personality-desc">{preset.desc}</span>
-                    {formData.selectedPersonality === preset.id && (
-                      <CheckCircle size={20} className="personality-check" />
-                    )}
+                    <h3 className={clsx(
+                      "font-bold mb-1 transition-colors",
+                      formData.selectedPersonality === p.id ? "text-[var(--md-sys-color-on-primary-container)]" : "text-[var(--md-sys-color-on-surface)]"
+                    )}>{p.name}</h3>
+                    <p className="text-sm opacity-60">{p.desc}</p>
                   </button>
                 ))}
               </div>
 
               {formData.selectedPersonality === 'custom' && (
-                <div className="form-group mt-6">
-                  <label className="form-label">自定义人格描述</label>
+                <div className="animate-fade-in-up space-y-3">
+                  <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">自定义人格指令</label>
                   <textarea
-                    className="form-textarea"
-                    placeholder="描述你希望 AI 具有什么样的性格和行为方式..."
-                    rows={4}
+                    className="w-full px-5 py-4 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] border border-transparent focus:border-[var(--md-sys-color-primary)] outline-none transition-all min-h-[120px] resize-none"
+                    placeholder="描述你希望 AI 表现出的性格特征..."
                     value={formData.customPersonality}
                     onChange={(e) => setFormData({ ...formData, customPersonality: e.target.value })}
                   />
                 </div>
               )}
-
-              <div className="form-group mt-6">
-                <label className="form-label">特殊指令（可选）</label>
-                <textarea
-                  className="form-textarea"
-                  placeholder="例如：每次对话结束时提醒我今天的目标、用简洁的语言回复..."
-                  rows={3}
-                  value={formData.instructions}
-                  onChange={(e) => setFormData({ ...formData, instructions: e.target.value })}
-                />
-              </div>
             </div>
           )}
 
-          {/* 步骤 3: 记忆上传 */}
           {step === 3 && (
-            <div className="onboarding-step animate-fade-in-up">
-              <div className="onboarding-icon">
-                <Brain size={32} />
+            <div className="animate-fade-in space-y-8">
+              <div className="text-center max-w-lg mx-auto mb-10">
+                <h2 className="text-4xl font-black tracking-tighter mb-4">知识摄取</h2>
+                <p className="text-[var(--md-sys-color-on-surface-variant)] opacity-60">上传你的笔记、日记或项目文档，让 AI 拥有你的记忆。</p>
               </div>
-              <h1 className="onboarding-title">上传你的记忆</h1>
-              <p className="onboarding-desc">
-                上传日记、笔记、文档等，帮助 AI 更好地理解你
-                <br />
-                <span className="text-xs text-[var(--color-text-muted)]">
-                  这些内容将被转化为长期记忆图谱
-                </span>
-              </p>
 
               <div 
-                className="upload-area"
                 onClick={() => fileInputRef.current?.click()}
+                className="border-2 border-dashed border-[var(--md-sys-color-outline-variant)] rounded-3xl p-12 text-center cursor-pointer hover:border-[var(--md-sys-color-primary)] hover:bg-[var(--md-sys-color-primary-container)]/10 transition-all group"
               >
-                <Upload size={40} className="upload-icon" />
-                <p className="upload-text">点击或拖拽文件到此处</p>
-                <p className="upload-hint">支持 PDF、TXT、MD、DOCX、JSON 格式</p>
-                <p className="upload-hint" style={{ fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>
-                  可上传 ChatGPT 导出的对话记录 (conversations.json)
-                </p>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  accept=".pdf,.txt,.md,.docx,.json"
-                  className="hidden"
-                  onChange={handleFileUpload}
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleFileUpload} 
+                  multiple 
+                  className="hidden" 
                 />
+                <div className="w-16 h-16 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
+                  <Upload className="text-[var(--md-sys-color-primary)]" size={32} />
+                </div>
+                <h3 className="font-bold text-lg mb-1">点击或拖拽上传文件</h3>
+                <p className="text-sm opacity-50">支持 PDF, TXT, MD, DOCX (最大 20MB)</p>
               </div>
 
               {uploadedFiles.length > 0 && (
-                <div className="uploaded-files">
+                <div className="grid gap-3">
                   {uploadedFiles.map((file) => (
-                    <div key={file.id} className="uploaded-file">
-                      {file.name.endsWith('.json') ? (
-                        <FileJson size={18} className="uploaded-file-icon" style={{ color: 'var(--color-warning)' }} />
-                      ) : (
-                        <FileText size={18} className="uploaded-file-icon" />
-                      )}
-                      <span className="uploaded-file-name">{file.name}</span>
-                      <div className="uploaded-file-status">
-                        {file.status === 'uploading' && <Loader2 size={16} className="animate-spin" />}
-                        {file.status === 'processing' && <span className="text-xs text-[var(--color-warning)]">处理中...</span>}
-                        {file.status === 'done' && <CheckCircle size={16} className="text-[var(--color-success)]" />}
-                        {file.status === 'error' && <span className="text-xs text-[var(--color-error)]">失败</span>}
+                    <div key={file.id} className="flex items-center justify-between p-4 rounded-2xl bg-[var(--md-sys-color-surface-container-low)] border border-[var(--md-sys-color-outline-variant)]">
+                      <div className="flex items-center gap-4">
+                        <FileText size={20} className="text-[var(--md-sys-color-primary)]" />
+                        <div>
+                          <p className="text-sm font-bold">{file.name}</p>
+                          <p className="text-[10px] uppercase tracking-widest opacity-40">{file.status}</p>
+                        </div>
                       </div>
-                      <button onClick={() => removeFile(file.id)} className="uploaded-file-remove">
-                        <X size={16} />
-                      </button>
+                      {file.status === 'done' ? (
+                        <CheckCircle className="text-green-500" size={20} />
+                      ) : (
+                        <Loader2 className="animate-spin opacity-30" size={20} />
+                      )}
                     </div>
                   ))}
                 </div>
               )}
-
-              <p className="form-hint text-center mt-4">
-                此步骤可跳过，后续可在设置中添加
-              </p>
             </div>
           )}
 
-          {/* 步骤 4: 愿景与目标 */}
           {step === 4 && (
-            <div className="onboarding-step animate-fade-in-up">
-              <div className="onboarding-icon">
-                <Target size={32} />
+            <div className="animate-fade-in space-y-8">
+              <div className="text-center max-w-lg mx-auto mb-10">
+                <h2 className="text-4xl font-black tracking-tighter mb-4">终局愿景</h2>
+                <p className="text-[var(--md-sys-color-on-surface-variant)] opacity-60">在这个系统中，你最希望达成的长期目标是什么？</p>
               </div>
-              <h1 className="onboarding-title">定义你的终局愿景</h1>
-              <p className="onboarding-desc">
-                描述你5年后想成为什么样的人，这将指引 AI 帮助你保持聚焦
-              </p>
 
-              <div className="onboarding-form">
-                <div className="form-group">
-                  <label className="form-label">你的终局愿景</label>
+              <div className="space-y-6">
+                <div className="space-y-3">
+                  <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">长期愿景 (Vision)</label>
                   <textarea
-                    className="form-textarea"
-                    placeholder="5年后，我希望自己是一个..."
-                    rows={4}
+                    className="w-full px-5 py-4 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] border border-transparent focus:border-[var(--md-sys-color-primary)] outline-none transition-all min-h-[100px] resize-none"
+                    placeholder="例如：建立一个可持续发展的个人生态系统..."
                     value={formData.vision}
                     onChange={(e) => setFormData({ ...formData, vision: e.target.value })}
                   />
                 </div>
 
-                <div className="form-group">
-                  <label className="form-label">核心目标（可添加多个）</label>
-                  <div className="goals-list">
+                <div className="space-y-3">
+                  <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">当前具体目标</label>
+                  <div className="space-y-3">
                     {formData.goals.map((goal, index) => (
-                      <div key={index} className="goal-item">
+                      <div key={index} className="flex gap-2">
                         <input
                           type="text"
-                          className="form-input"
+                          className="flex-1 px-5 py-4 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] border border-transparent focus:border-[var(--md-sys-color-primary)] outline-none transition-all"
                           placeholder={`目标 ${index + 1}`}
                           value={goal}
-                          onChange={(e) => updateGoal(index, e.target.value)}
+                          onChange={(e) => {
+                            const newGoals = [...formData.goals];
+                            newGoals[index] = e.target.value;
+                            setFormData({ ...formData, goals: newGoals });
+                          }}
                         />
                         {formData.goals.length > 1 && (
-                          <button onClick={() => removeGoal(index)} className="goal-remove">
-                            <X size={18} />
+                          <button 
+                            onClick={() => setFormData({ ...formData, goals: formData.goals.filter((_, i) => i !== index) })}
+                            className="p-4 rounded-2xl hover:bg-[var(--md-sys-color-error-container)] hover:text-[var(--md-sys-color-on-error-container)] transition-colors opacity-30 hover:opacity-100"
+                          >
+                            <X size={20} />
                           </button>
                         )}
                       </div>
                     ))}
+                    <button 
+                      onClick={() => setFormData({ ...formData, goals: [...formData.goals, ''] })}
+                      className="flex items-center gap-2 text-sm font-bold opacity-50 hover:opacity-100 px-2 py-1 transition-all"
+                    >
+                      <Plus size={16} /> 添加目标
+                    </button>
                   </div>
-                  <button onClick={addGoal} className="add-goal-btn">
-                    <Plus size={18} />
-                    添加目标
-                  </button>
                 </div>
               </div>
             </div>
           )}
-        </div>
 
-        {/* 导航按钮 */}
-        <div className="onboarding-nav">
-          {step > 1 && (
-            <button onClick={handleBack} className="onboarding-nav-btn onboarding-nav-back">
-              <ArrowLeft size={20} />
-              上一步
+          {/* 底部按钮 */}
+          <div className="flex justify-between items-center mt-12 pt-8 border-t border-[var(--md-sys-color-outline-variant)]">
+            <button
+              onClick={() => step > 1 && setStep(step - 1)}
+              disabled={step === 1}
+              className={clsx(
+                "flex items-center gap-2 px-6 py-3 rounded-xl font-bold transition-all",
+                step === 1 ? "opacity-0 pointer-events-none" : "opacity-50 hover:opacity-100"
+              )}
+            >
+              <ArrowLeft size={20} /> 返回
             </button>
-          )}
-          <button
-            onClick={handleNext}
-            disabled={!isStepValid()}
-            className="onboarding-nav-btn onboarding-nav-next"
-          >
-            {step === totalSteps ? '完成设置' : '下一步'}
-            <ArrowRight size={20} />
-          </button>
-        </div>
-      </div>
+            
+            <Button
+              onClick={handleNext}
+              className="px-10 py-6 rounded-2xl shadow-xl shadow-[var(--md-sys-color-primary)]/20 font-black tracking-tighter"
+            >
+              {step === totalSteps ? '开启系统' : '继续下一步'}
+              <ArrowRight size={20} className="ml-2" />
+            </Button>
+          </div>
+        </GlassCard>
+      </main>
     </div>
   );
 }

@@ -2,14 +2,20 @@
 全局配置
 存储系统提示词、终局愿景等常量
 """
+import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # 基础路径
 BASE_DIR = Path(__file__).parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = BASE_DIR / "uploads"
 
+# 加载环境变量
+load_dotenv(BASE_DIR / ".env")
+
 # 终局愿景 (P0 核心)
+# ... (保持不变)
 ENDGAME_VISION = """
 用户 5 年后的终局愿景：
 成为一名能够通过技术和艺术融合，创造出改变人类认知工具的独立开发者与思想家。
@@ -46,4 +52,16 @@ UVICORN_CONFIG = {
     "port": 8888,
     "log_level": "info",
     "reload": True
+}
+
+# 模型配置
+MODELS_DIR = BASE_DIR / "models"
+EMBEDDING_MODEL_NAME = "BAAI_bge-large-zh-v1.5"
+LOCAL_EMBEDDING_PATH = MODELS_DIR / EMBEDDING_MODEL_NAME
+
+MODEL_CONFIG = {
+    # 优先使用本地模型，如果不存在则使用 Hugging Face Hub
+    "embedding_model": str(LOCAL_EMBEDDING_PATH) if LOCAL_EMBEDDING_PATH.exists() else f"sentence-transformers/{EMBEDDING_MODEL_NAME}",
+    "gemini_model": "gemini-2.0-flash", # 根据要求更新为 2.0 版本
+    "gemini_api_key": os.getenv("GOOGLE_API_KEY", "")
 }

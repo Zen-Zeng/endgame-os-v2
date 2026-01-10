@@ -51,7 +51,8 @@ def run_ingestion_task(task_id: str, file_paths: List[str]):
         tasks_db[task_id].message = f"正在摄取 {len(file_paths)} 个文件..."
         
         # 实际调用同步的记忆摄取方法
-        memory_service.ingest_files(file_paths)
+        for file_path in file_paths:
+            memory_service.ingest_file(file_path)
         
         tasks_db[task_id].status = TaskStatus.COMPLETED
         tasks_db[task_id].progress = 100
@@ -86,23 +87,24 @@ app.add_middleware(
 # 注册 API 路由
 app.include_router(api_router)
 
+# 挂载前端静态文件 (如果存在)
+FRONTEND_DIST = Path(__file__).parent.parent.parent / "face" / "dist"
+if FRONTEND_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
+    logger.info(f"已挂载前端静态文件: {FRONTEND_DIST}")
+else:
+    logger.warning(f"未找到前端静态文件目录: {FRONTEND_DIST}，将只提供 API 服务")
+    @app.get("/")
+    async def root():
+        return {
+            "message": "Endgame OS Brain API",
+            "status": "running",
+            "version": "2.0.0",
+            "frontend": "Not mounted (run 'npm run build' in face directory)"
+        }
+
 memory_service = MemoryService()
 UPLOAD_DIR.mkdir(exist_ok=True)
-
-@app.get("/")
-async def root():
-    """
-    根路径健康检查接口
-    """
-    return {
-        "message": "Endgame OS Brain API",
-        "status": "running",
-        "version": "2.0.0",
-        "endpoints": {
-            "health": "/api/health",
-            "v1": "/api/v1"
-        }
-    }
 
 @app.get("/api/health")
 async def health_check():
@@ -129,10 +131,11 @@ def main():
     logger.info(f"启动服务器: host={args.host}, port={args.port}")
     
     uvicorn.run(
-        app,
+        "app.main:app",
         host=args.host,
         port=args.port,
-        log_level=UVICORN_CONFIG["log_level"]
+        log_level=UVICORN_CONFIG["log_level"],
+        reload=UVICORN_CONFIG.get("reload", False)
     )
 
 if __name__ == "__main__":

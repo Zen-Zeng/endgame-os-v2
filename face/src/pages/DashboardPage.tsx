@@ -1,465 +1,387 @@
 /**
- * 仪表盘页面
- * 按照原型图 Layout 2 设计
+ * Endgame OS v2 - Dashboard Page
+ * AI-Summary Header | Reminders | Vision | Goals | H3 Energy | Activity Logs
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Activity,
   MessageSquare,
   Target,
-  TrendingUp,
-  TrendingDown,
-  Clock,
   Zap,
   ChevronRight,
-  Loader2,
+  Flag,
+  Coffee,
+  Moon,
+  Calendar,
+  PieChart,
 } from 'lucide-react';
 import GlassCard from '../components/layout/GlassCard';
+import Button from '../components/ui/Button';
 import { useAuthStore } from '../stores/useAuthStore';
 import { useH3Store } from '../stores/useH3Store';
-import { useOnboardingStore } from '../stores/useOnboardingStore';
 import { api } from '../lib/api';
+import Slider from '../components/ui/Slider';
+import type { H3Scores } from '../stores/useH3Store';
 
 // H3 维度配置
 const h3Dimensions = [
-  { key: 'mind', label: '心智', color: 'var(--color-h3-mind)' },
-  { key: 'body', label: '身体', color: 'var(--color-h3-body)' },
-  { key: 'spirit', label: '精神', color: 'var(--color-h3-spirit)' },
-  { key: 'vocation', label: '志业', color: 'var(--color-h3-vocation)' },
+  { key: 'mind' as keyof H3Scores, label: '心智', color: 'var(--md-sys-color-primary)', icon: '🧠' },
+  { key: 'body' as keyof H3Scores, label: '身体', color: '#aaddbf', icon: '💪' },
+  { key: 'spirit' as keyof H3Scores, label: '精神', color: '#ffb4a9', icon: '✨' },
+  { key: 'vocation' as keyof H3Scores, label: '志业', color: '#a8c7fa', icon: '🎯' },
 ] as const;
-
-interface DashboardStats {
-  totalConversations: number;
-  streakDays: number;
-  goalsProgress: number;
-  todayMessages: number;
-}
-
-interface ActivityItem {
-  id: string;
-  type: 'chat' | 'calibration' | 'goal' | 'memory';
-  title: string;
-  time: string;
-}
 
 export default function DashboardPage() {
   const navigate = useNavigate();
   const { user } = useAuthStore();
-  const { scores: storeScores, fetchCurrentState, isLoading: h3Loading } = useH3Store();
-  const { personaConfig: onboardingPersonaConfig, h3InitialState } = useOnboardingStore();
+  const { scores, fetchCurrentState } = useH3Store();
   
-  // 优先使用 H3Store 的数据，如果为空则使用 onboarding 的初始数据
-  const defaultScores = { mind: 0, body: 0, spirit: 0, vocation: 0 };
-  const onboardingScores = h3InitialState ? {
-    mind: h3InitialState.mind,
-    body: h3InitialState.body,
-    spirit: h3InitialState.spirit,
-    vocation: h3InitialState.vocation,
-  } : defaultScores;
+  // 本地暂存的 H3 分数，用于点击调整
+  const [localScores, setLocalScores] = useState(scores);
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const [loading, setLoading] = useState(true);
   
-  // 如果 storeScores 全为 0，使用 onboarding 数据
-  const hasStoreData = storeScores && (storeScores.mind > 0 || storeScores.body > 0 || storeScores.spirit > 0 || storeScores.vocation > 0);
-  const scores = hasStoreData ? storeScores : (onboardingScores.mind > 0 ? onboardingScores : defaultScores);
-  
-  const [greeting, setGreeting] = useState('');
-  const [stats, setStats] = useState<DashboardStats>({
-    totalConversations: 0,
-    streakDays: 0,
-    goalsProgress: 0,
-    todayMessages: 0,
+  const [data, setData] = useState<any>({
+    stats: {
+      total_conversations: 0,
+      streak_days: 0,
+      total_goals: 0,
+      completed_goals: 0,
+      today_messages: 0,
+      today_calibrations: 0
+    },
+    recent_activities: [],
+    active_goals: [],
+    ai_summary: '正在生成系统实时概览...',
+    vision: {
+      title: '终局愿景',
+      description: '',
+      progress: 0
+    }
   });
-  const [activities, setActivities] = useState<ActivityItem[]>([]);
-  const [isLoadingStats, setIsLoadingStats] = useState(true);
-  const [personaName, setPersonaName] = useState<string>('The Architect');
-  const [userVision, setUserVision] = useState<string>('');
 
-  // 设置问候语
   useEffect(() => {
-    const hour = new Date().getHours();
-    if (hour < 12) setGreeting('早安');
-    else if (hour < 18) setGreeting('下午好');
-    else setGreeting('晚上好');
-  }, []);
-
-  // 获取 H3 状态
-  useEffect(() => {
-    fetchCurrentState();
+    const fetchData = async () => {
+      try {
+        const response = await api.get<any>('/dashboard/overview');
+        if (response) {
+          setData(response);
+        }
+      } catch (e) {
+        console.error('Fetch dashboard error', e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
+    fetchCurrentState(); // 强制刷新全局 H3 状态
   }, [fetchCurrentState]);
 
-  // 获取用户配置数据（数字人格、愿景等）
+  // 当全局分数更新时，同步本地分数
   useEffect(() => {
-    const fetchUserConfig = async () => {
-      try {
-        // 获取数字人格配置
-        const personaData = await api.get('/persona/current').catch(() => null);
-        if (personaData?.name) {
-          setPersonaName(personaData.name);
-        } else if (onboardingPersonaConfig?.aiName) {
-          setPersonaName(onboardingPersonaConfig.aiName);
-        }
+    setLocalScores(scores);
+  }, [scores]);
 
-        // 获取用户愿景
-        const userData = await api.get('/auth/me').catch(() => null);
-        if (userData?.vision?.description) {
-          setUserVision(userData.vision.description);
-        } else if (onboardingPersonaConfig?.vision) {
-          setUserVision(onboardingPersonaConfig.vision);
-        }
-      } catch (error) {
-        console.error('获取用户配置失败:', error);
-        // 使用 onboarding 数据作为后备
-        if (onboardingPersonaConfig) {
-          setPersonaName(onboardingPersonaConfig.aiName || 'The Architect');
-          setUserVision(onboardingPersonaConfig.vision || '');
-        }
-      }
-    };
-
-    fetchUserConfig();
-  }, [onboardingPersonaConfig]);
-
-  // 获取仪表盘统计数据
-  useEffect(() => {
-    const fetchStats = async () => {
-      setIsLoadingStats(true);
-      try {
-        const response = await api.get<{ stats: DashboardStats; activities: ActivityItem[] }>('/dashboard/stats');
-        // 确保不会设置 undefined
-        if (response?.stats) {
-          setStats(response.stats);
-        }
-        if (response?.activities) {
-          setActivities(response.activities);
-        }
-      } catch (error) {
-        console.error('获取仪表盘数据失败:', error);
-        // 保持默认状态，不做任何更改
-      } finally {
-        setIsLoadingStats(false);
-      }
-    };
-
-    fetchStats();
-  }, []);
-
-  // 计算 H3 总分
-  const h3Total = Math.round(
-    (scores.mind + scores.body + scores.spirit + scores.vocation) / 4
-  );
-
-  // 根据分数判断趋势（简化逻辑，后续可从后端获取）
-  const h3Trend = h3Total >= 60 ? 'up' : 'down';
-
-  // 格式化时间
-  const formatTime = (dateString: string) => {
-    const date = new Date(dateString);
+  const h3Total = Math.round(((localScores?.mind || 0) + (localScores?.body || 0) + (localScores?.spirit || 0) + (localScores?.vocation || 0)) / 4);
+  const displayName = user?.name || '岳';
+  
+  // 生成数字分身问候语
+  const fullGreeting = useMemo(() => {
     const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
+    const hour = now.getHours();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    const date = now.getDate();
+    const dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    const dayName = dayNames[now.getDay()];
+    
+    let timeGreeting = '';
+    if (hour < 5) timeGreeting = '深夜好';
+    else if (hour < 11) timeGreeting = '早上好';
+    else if (hour < 13) timeGreeting = '中午好';
+    else if (hour < 18) timeGreeting = '下午好';
+    else timeGreeting = '晚上好';
 
-    if (diffMins < 1) return '刚刚';
-    if (diffMins < 60) return `${diffMins}分钟前`;
-    if (diffHours < 24) return `${diffHours}小时前`;
-    if (diffDays === 1) return '昨天';
-    return `${diffDays}天前`;
+    const futureMessages = [
+      '你的未来版本正在观察此刻的决策，保持对齐。',
+      '每一个当下的刻意练习，都在重塑终局的轮廓。',
+      '检测到时间线平稳，今日是推进核心愿景的绝佳窗口。',
+      '记住，系统存在的意义是放大你的意志，而非替代你的思考。',
+      '在复杂的世界中，保持对终局愿景的极简专注。',
+      '数据回传显示：你今天的专注度将决定下周的自由度。',
+      '欢迎回到指挥中心，心智引擎已就绪。'
+    ];
+    const randomFutureMsg = futureMessages[Math.floor(Math.random() * futureMessages.length)];
+    
+    return `${displayName}，${timeGreeting}。今天是 ${year}年${month}月${date}日${dayName}，${randomFutureMsg}`;
+  }, [displayName]);
+
+  // 格式化相对时间
+  const formatTime = (isoString: string) => {
+    const date = new Date(isoString);
+    const now = new Date();
+    const diff = now.getTime() - date.getTime();
+    if (diff < 60000) return '刚刚';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`;
+    return date.toLocaleDateString();
   };
 
-  // 获取用户显示名称（优先使用后端数据，然后是 onboarding 数据）
-  const displayName = user?.name || onboardingPersonaConfig?.nickname || '用户';
+  // 今日提醒逻辑
+  const reminder = useMemo(() => {
+    const now = new Date();
+    const hour = now.getHours();
+    const day = now.getDay(); // 0 是周日
+    const isLastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() === now.getDate();
+
+    // 优先级：月审计 > 周盘点 > 日复盘 > 日启动
+    if (isLastDayOfMonth && hour >= 18) {
+      return {
+        type: 'monthly',
+        title: '月度系统审计',
+        desc: '本月终局对齐度评估，重新校准长期航线',
+        icon: <PieChart size={28} />,
+        color: 'var(--md-sys-color-tertiary)'
+      };
+    }
+    if (day === 0 && hour >= 18) {
+      return {
+        type: 'weekly',
+        title: '周中枢盘点',
+        desc: '回顾本周进展，规划下周核心突破点',
+        icon: <Calendar size={28} />,
+        color: 'var(--md-sys-color-secondary)'
+      };
+    }
+    if (hour >= 17) {
+      return {
+        type: 'evening',
+        title: '日终复盘',
+        desc: '记录今日洞察，清理认知缓存',
+        icon: <Moon size={28} />,
+        color: 'var(--md-sys-color-primary)'
+      };
+    }
+    if (hour >= 8) {
+      return {
+        type: 'morning',
+        title: '日启动协议',
+        desc: '同步终局愿景，锁定今日 Critical Task',
+        icon: <Coffee size={28} />,
+        color: 'var(--md-sys-color-primary)'
+      };
+    }
+    return null;
+  }, []);
+
+  const handleScoreChange = (key: keyof typeof scores, val: number[]) => {
+    setLocalScores(prev => ({ ...prev, [key]: val[0] }));
+  };
+
+  const handleCalibrate = async () => {
+    setIsCalibrating(true);
+    try {
+      // 使用 store 的 updateScores 确保全局状态同步更新
+      await useH3Store.getState().updateScores(localScores, '手动校准', 'manual');
+      
+      // 刷新仪表盘统计数据
+      const response = await api.get<any>('/dashboard/overview');
+      if (response) setData(response);
+    } catch (e) {
+      console.error('Calibration failed', e);
+    } finally {
+      setIsCalibrating(false);
+    }
+  };
 
   return (
-    <div className="dashboard-page">
-      {/* 页面标题 */}
-      <header className="page-header animate-fade-in-down">
-        <h1 className="page-title">
-          {greeting}，{displayName}
+    <div className="page-container space-y-[var(--md-sys-spacing-6)] pb-20">
+      {/* 1. HEADER - AI Summary & Stats Integrated */}
+      <header className="py-[var(--md-sys-spacing-4)] space-y-[var(--md-sys-spacing-4)]">
+        <h1 className="text-[var(--md-sys-typescale-display-small-size)] font-bold text-[var(--md-sys-color-on-background)] max-w-4xl">
+          {fullGreeting}
         </h1>
-        <p className="page-subtitle">
-          {(stats?.streakDays ?? 0) > 0 
-            ? `今天是你连续活跃的第 ${stats?.streakDays ?? 0} 天 🔥`
-            : '开始你的第一天，建立能量追踪习惯 ✨'
-          }
-        </p>
+        
+        <div className="flex gap-10 items-center">
+          <div>
+            <p className="text-[var(--md-sys-typescale-label-medium-size)] opacity-50 uppercase tracking-tighter">对齐天数</p>
+            <p className="text-[var(--md-sys-typescale-title-large-size)] font-black text-[var(--md-sys-color-primary)]">{data.stats?.streak_days || 0}</p>
+          </div>
+          <div>
+            <p className="text-[var(--md-sys-typescale-label-medium-size)] opacity-50 uppercase tracking-tighter">对话</p>
+            <p className="text-[var(--md-sys-typescale-title-large-size)] font-black">{data.stats?.total_messages || 0}</p>
+          </div>
+          <div>
+            <p className="text-[var(--md-sys-typescale-label-medium-size)] opacity-50 uppercase tracking-tighter">能量点</p>
+            <p className="text-[var(--md-sys-typescale-title-large-size)] font-black text-[var(--md-sys-color-secondary)]">{data.stats?.energy_points || 0}</p>
+          </div>
+        </div>
+
+        <div className="max-w-3xl pt-2">
+          <p className="text-[var(--md-sys-typescale-headline-small-size)] text-[var(--md-sys-color-on-surface-variant)] leading-relaxed opacity-90 italic">
+            「{String(data.ai_summary || '').includes('。') ? String(data.ai_summary || '').split('。').slice(1).join('。') : String(data.ai_summary || '')}」
+          </p>
+        </div>
       </header>
 
-      {/* 主要内容区域 */}
-      <div className="dashboard-grid">
-        {/* H3 能量概览 - 大卡片 */}
-        <div className="col-span-12 lg:col-span-8">
-          <GlassCard className="animate-fade-in-up" hover>
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="font-display text-xl font-semibold text-[var(--color-text-primary)]">
-                  H3 能量状态
-                </h2>
-                <p className="text-sm text-[var(--color-text-secondary)]">
-                  今日综合能量
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                {h3Loading ? (
-                  <Loader2 className="animate-spin text-[var(--color-primary)]" size={24} />
-                ) : (
-                  <>
-                    <span className="text-4xl font-bold text-[var(--color-primary)]">
-                      {h3Total}%
-                    </span>
-                    {h3Trend === 'up' ? (
-                      <TrendingUp className="text-[var(--color-success)]" size={24} />
-                    ) : (
-                      <TrendingDown className="text-[var(--color-error)]" size={24} />
-                    )}
-                  </>
-                )}
-              </div>
+      {/* 2. TODAY REMINDERS */}
+      {reminder && (
+        <section className="space-y-[var(--md-sys-spacing-3)]">
+          <h3 className="text-[var(--md-sys-typescale-title-large-size)] px-2">今日提醒</h3>
+          <GlassCard 
+            variant="filled" 
+            padding="md" 
+            className="flex items-center gap-6 border-l-4"
+            style={{ borderLeftColor: reminder.color }}
+          >
+            <div 
+              className="w-14 h-14 rounded-full flex items-center justify-center"
+              style={{ backgroundColor: `${reminder.color}20`, color: reminder.color }}
+            >
+              {reminder.icon}
             </div>
-
-            {/* 四维能量条 */}
-            <div className="grid grid-cols-2 gap-6">
-              {h3Dimensions.map((dim) => {
-                const value = scores[dim.key];
-                return (
-                  <div key={dim.key}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm text-[var(--color-text-secondary)]">
-                        {dim.label}
-                      </span>
-                      <span className="text-sm font-medium text-[var(--color-text-primary)]">
-                        {value}%
-                      </span>
-                    </div>
-                    <div className="h-3 bg-[var(--color-bg-darker)] rounded-full overflow-hidden">
-                      <div
-                        className="h-full rounded-full transition-all duration-1000"
-                        style={{
-                          width: `${value}%`,
-                          backgroundColor: dim.color,
-                        }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="flex-1">
+              <p className="text-[var(--md-sys-typescale-title-large-size)] font-black">{reminder.title}</p>
+              <p className="text-[var(--md-sys-typescale-body-large-size)] opacity-60">{reminder.desc}</p>
             </div>
-
-            {/* 快捷操作 */}
-            <div className="mt-6 pt-6 border-t border-[var(--color-border-light)] flex gap-4">
-              <button 
-                className="btn btn-primary flex-1"
-                onClick={() => navigate('/calibration')}
-              >
-                <Activity size={18} />
-                开始校准
-              </button>
-              <button 
-                className="btn btn-secondary flex-1"
-                onClick={() => navigate('/chat')}
-              >
-                <MessageSquare size={18} />
-                与 AI 对话
-              </button>
-            </div>
+            <Button variant="tonal" onClick={() => navigate('/chat')}>
+              立即开始
+            </Button>
           </GlassCard>
-        </div>
+        </section>
+      )}
 
-        {/* 统计卡片 */}
-        <div className="col-span-12 lg:col-span-4 space-y-6">
-          {/* 对话统计 */}
-          <GlassCard className="animate-fade-in-up delay-100" hover>
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-xl bg-[var(--color-primary-alpha-20)] flex items-center justify-center">
-                <MessageSquare className="text-[var(--color-primary)]" size={24} />
-              </div>
-              <div>
-                {isLoadingStats ? (
-                  <Loader2 className="animate-spin text-[var(--color-primary)]" size={20} />
-                ) : (
-                  <>
-                    <p className="text-2xl font-bold text-[var(--color-text-primary)]">
-                      {stats?.totalConversations ?? 0}
-                    </p>
-                    <p className="text-sm text-[var(--color-text-secondary)]">
-                      总对话数
-                    </p>
-                  </>
-                )}
-              </div>
-            </div>
-          </GlassCard>
-
-          {/* 目标进度 */}
-          <GlassCard className="animate-fade-in-up delay-200" hover>
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-xl bg-[var(--color-success)]/20 flex items-center justify-center">
-                <Target className="text-[var(--color-success)]" size={24} />
-              </div>
-              <div className="flex-1">
-                {isLoadingStats ? (
-                  <Loader2 className="animate-spin text-[var(--color-primary)]" size={20} />
-                ) : (
-                  <>
-                    <p className="text-2xl font-bold text-[var(--color-text-primary)]">
-                      {stats?.goalsProgress ?? 0}%
-                    </p>
-                    <p className="text-sm text-[var(--color-text-secondary)]">
-                      目标完成度
-                    </p>
-                  </>
-                )}
-              </div>
-            </div>
-            <div className="mt-4 h-2 bg-[var(--color-bg-darker)] rounded-full overflow-hidden">
-              <div
-                className="h-full bg-[var(--color-success)] rounded-full transition-all duration-1000"
-                style={{ width: `${stats?.goalsProgress ?? 0}%` }}
-              />
-            </div>
-          </GlassCard>
-
-          {/* 今日活跃 */}
-          <GlassCard className="animate-fade-in-up delay-300" hover>
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-xl bg-[var(--color-warning)]/20 flex items-center justify-center">
-                <Zap className="text-[var(--color-warning)]" size={24} />
-              </div>
-              <div>
-                {isLoadingStats ? (
-                  <Loader2 className="animate-spin text-[var(--color-primary)]" size={20} />
-                ) : (
-                  <>
-                    <p className="text-2xl font-bold text-[var(--color-text-primary)]">
-                      {stats?.todayMessages ?? 0}
-                    </p>
-                    <p className="text-sm text-[var(--color-text-secondary)]">
-                      今日消息
-                    </p>
-                  </>
-                )}
-              </div>
-            </div>
-          </GlassCard>
-        </div>
-
-        {/* 最近活动 */}
-        <div className="col-span-12 lg:col-span-6">
-          <GlassCard className="animate-fade-in-up delay-400">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="font-display text-lg font-semibold text-[var(--color-text-primary)]">
-                最近活动
+      {/* 3. ENDGAME VISION */}
+      <section className="space-y-[var(--md-sys-spacing-3)]">
+        <h3 className="text-[var(--md-sys-typescale-title-large-size)] px-2">
+          终局愿景
+        </h3>
+        <GlassCard variant="outlined" padding="lg" className="relative overflow-hidden group">
+          <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-10 transition-opacity">
+            <Flag size={120} />
+          </div>
+          <div className="space-y-6 relative z-10">
+            <div className="w-full">
+              <h2 className="text-[var(--md-sys-typescale-headline-medium-size)] font-bold text-[var(--md-sys-color-primary)]">
+                {data.vision?.title || '终局愿景'}
               </h2>
-              <button 
-                className="text-[var(--color-primary)] text-sm hover:underline flex items-center gap-1"
-                onClick={() => navigate('/archives')}
-              >
-                查看全部 <ChevronRight size={16} />
-              </button>
+              <p className="text-[var(--md-sys-typescale-body-large-size)] mt-4 opacity-80 max-w-3xl leading-[1.8] tracking-wide text-left text-justify">
+                {String(data.vision?.description || '')}
+              </p>
             </div>
-
-            <div className="space-y-4">
-              {activities.length === 0 ? (
-                <div className="text-center py-8 text-[var(--color-text-muted)]">
-                  <p>还没有活动记录</p>
-                  <p className="text-sm mt-1">开始与 AI 对话或进行 H3 校准</p>
-                </div>
-              ) : (
-                activities.slice(0, 5).map((activity) => (
-                  <div
-                    key={activity.id}
-                    className="flex items-center gap-4 p-3 rounded-xl hover:bg-[var(--color-bg-card-hover)] transition-colors cursor-pointer"
-                  >
-                    <div className="w-10 h-10 rounded-lg bg-[var(--color-primary-alpha-20)] flex items-center justify-center">
-                      {activity.type === 'chat' && (
-                        <MessageSquare size={18} className="text-[var(--color-primary)]" />
-                      )}
-                      {activity.type === 'calibration' && (
-                        <Activity size={18} className="text-[var(--color-primary)]" />
-                      )}
-                      {activity.type === 'goal' && (
-                        <Target size={18} className="text-[var(--color-primary)]" />
-                      )}
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-[var(--color-text-primary)]">
-                        {activity.title}
-                      </p>
-                      <p className="text-xs text-[var(--color-text-muted)]">
-                        {formatTime(activity.time)}
-                      </p>
-                    </div>
-                    <ChevronRight size={16} className="text-[var(--color-text-muted)]" />
-                  </div>
-                ))
-              )}
-            </div>
-          </GlassCard>
-        </div>
-
-        {/* 今日提醒 */}
-        <div className="col-span-12 lg:col-span-6">
-          <GlassCard className="animate-fade-in-up delay-500">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="font-display text-lg font-semibold text-[var(--color-text-primary)]">
-                今日提醒
-              </h2>
-              <span className="badge badge-primary">
-                {h3Total < 50 ? '3 项' : '2 项'}
-              </span>
-            </div>
-
-            <div className="space-y-3">
-              <div 
-                className="flex items-start gap-3 p-3 rounded-xl bg-[var(--color-primary-alpha-20)] border border-[var(--color-primary-alpha-40)] cursor-pointer"
-                onClick={() => navigate('/calibration')}
-              >
-                <Clock size={18} className="text-[var(--color-primary)] mt-0.5" />
-                <div>
-                  <p className="text-sm font-medium text-[var(--color-text-primary)]">
-                    晨间 H3 校准
-                  </p>
-                  <p className="text-xs text-[var(--color-text-secondary)]">
-                    保持每日校准习惯
-                  </p>
-                </div>
+            <div className="w-full pt-4">
+              <div className="flex justify-between items-end mb-2">
+                <span className="text-[var(--md-sys-typescale-label-large-size)] font-bold opacity-40 uppercase tracking-[0.2em]">Vision Alignment</span>
+                <span className="text-[var(--md-sys-typescale-display-small-size)] font-black text-[var(--md-sys-color-tertiary)] opacity-30 leading-none">{data.vision?.progress || 0}%</span>
               </div>
-
-              {h3Total < 50 && (
+              <div className="h-3 bg-[var(--md-sys-color-surface-container-highest)] rounded-full overflow-hidden">
                 <div 
-                  className="flex items-start gap-3 p-3 rounded-xl bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30 cursor-pointer"
-                  onClick={() => navigate('/chat')}
-                >
-                  <Zap size={18} className="text-[var(--color-warning)] mt-0.5" />
-                  <div>
-                    <p className="text-sm font-medium text-[var(--color-text-primary)]">
-                      能量偏低，建议对话
-                    </p>
-                    <p className="text-xs text-[var(--color-text-secondary)]">
-                      与 AI 聊聊你的状态
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              <div 
-                className="flex items-start gap-3 p-3 rounded-xl hover:bg-[var(--color-bg-card-hover)] transition-colors cursor-pointer"
-                onClick={() => navigate('/chat')}
-              >
-                <MessageSquare size={18} className="text-[var(--color-text-muted)] mt-0.5" />
-                <div>
-                  <p className="text-sm font-medium text-[var(--color-text-primary)]">
-                    与 {personaName} 进行对话
-                  </p>
-                  <p className="text-xs text-[var(--color-text-secondary)]">
-                    保持终局聚焦
-                  </p>
-                </div>
+                  className="h-full bg-gradient-to-r from-[var(--md-sys-color-primary)] via-[var(--md-sys-color-secondary)] to-[var(--md-sys-color-tertiary)] transition-all duration-1000"
+                  style={{ width: `${data.vision?.progress || 0}%` }}
+                />
               </div>
             </div>
+          </div>
+        </GlassCard>
+      </section>
+
+      {/* 4. GOALS & H3 GRID */}
+      <div className="grid grid-cols-12 gap-[var(--md-sys-spacing-4)]">
+        {/* GOALS MODULE */}
+        <div className="col-span-12 lg:col-span-7 space-y-[var(--md-sys-spacing-3)]">
+          <div className="flex justify-between items-center px-2">
+            <h3 className="text-[var(--md-sys-typescale-title-large-size)]">核心目标</h3>
+            <button className="text-[var(--md-sys-typescale-label-large-size)] text-[var(--md-sys-color-primary)] font-bold" onClick={() => navigate('/goals')}>管理目标</button>
+          </div>
+          <div className="space-y-[var(--md-sys-spacing-2)]">
+            {data.active_goals.length > 0 ? data.active_goals.map((goal: any) => (
+              <GlassCard variant="filled" padding="md" className="hover:bg-[var(--md-sys-color-surface-container-high)] transition-colors cursor-pointer group">
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 rounded-full bg-[var(--md-sys-color-secondary-container)] flex items-center justify-center text-[var(--md-sys-color-on-secondary-container)]">
+                    <Target size={20} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="font-bold text-[var(--md-sys-typescale-body-large-size)]">{goal.title}</p>
+                    <div className="flex items-center gap-4 mt-1">
+                      <div className="flex-1 h-1.5 bg-[var(--md-sys-color-surface-variant)] rounded-full overflow-hidden">
+                        <div className="h-full bg-[var(--md-sys-color-secondary)]" style={{ width: `${goal.progress}%` }} />
+                      </div>
+                      <span className="text-xs opacity-60 font-mono">{goal.progress}%</span>
+                    </div>
+                  </div>
+                  <ChevronRight size={20} className="opacity-20 group-hover:opacity-100 transition-opacity" />
+                </div>
+              </GlassCard>
+            )) : (
+              <p className="p-8 text-center opacity-40 italic bg-[var(--md-sys-color-surface-container-low)] rounded-[var(--md-sys-shape-corner-large)]">暂无活跃目标，建议去“目标”页面建立你的第一个坐标</p>
+            )}
+          </div>
+        </div>
+
+        {/* H3 ENERGY - INTERACTIVE */}
+        <div className="col-span-12 lg:col-span-5 space-y-[var(--md-sys-spacing-3)]">
+          <div className="flex justify-between items-center px-2">
+            <h3 className="text-[var(--md-sys-typescale-title-large-size)]">H3 能量状态</h3>
+            <span className="text-2xl font-black text-[var(--md-sys-color-primary)]">{h3Total}%</span>
+          </div>
+          <GlassCard variant="filled" padding="lg" className="space-y-6">
+            <div className="grid grid-cols-1 gap-6">
+              {h3Dimensions.map((dim) => (
+                <div key={dim.key} className="space-y-3">
+                  <div className="flex justify-between text-[var(--md-sys-typescale-label-large-size)]">
+                    <span className="flex items-center gap-2">
+                      <span className="text-xl">{dim.icon}</span>
+                      <span className="font-bold">{dim.label}</span>
+                    </span>
+                    <span className="font-mono font-bold" style={{ color: dim.color }}>{localScores[dim.key] || 0}%</span>
+                  </div>
+                  <Slider
+                    value={[localScores[dim.key] || 0]}
+                    max={100}
+                    step={5}
+                    onValueChange={(val: number[]) => handleScoreChange(dim.key, val)}
+                  />
+                </div>
+              ))}
+            </div>
+            <Button 
+              className="w-full h-12" 
+              icon={<Activity size={18} />}
+              onClick={handleCalibrate}
+              loading={isCalibrating}
+            >
+              立即校准
+            </Button>
           </GlassCard>
         </div>
       </div>
+
+      {/* 5. RECENT ACTIVITIES - System Logs */}
+      <section className="space-y-[var(--md-sys-spacing-3)]">
+        <div className="flex justify-between items-center px-2">
+          <h3 className="text-[var(--md-sys-typescale-title-large-size)]">系统动态</h3>
+          <button className="text-[var(--md-sys-typescale-label-large-size)] text-[var(--md-sys-color-primary)] font-bold">查看全部</button>
+        </div>
+        <div className="space-y-[var(--md-sys-spacing-1)]">
+          {data.recent_activities.length > 0 ? data.recent_activities.map((log: any) => (
+            <div key={log.id} className="flex items-center gap-4 p-4 rounded-[var(--md-sys-shape-corner-large)] hover:bg-[var(--md-sys-color-surface-container)] transition-colors group">
+              <div className="w-10 h-10 rounded-full bg-[var(--md-sys-color-surface-container-highest)] flex items-center justify-center text-[var(--md-sys-color-on-surface-variant)] group-hover:bg-[var(--md-sys-color-primary-container)] group-hover:text-[var(--md-sys-color-on-primary-container)] transition-colors">
+                {log.type === 'chat' ? <MessageSquare size={18} /> : log.type === 'calibration' ? <Zap size={18} /> : <Activity size={18} />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-[var(--md-sys-typescale-body-large-size)] font-bold truncate">{log.title}</p>
+                <p className="text-[var(--md-sys-typescale-body-medium-size)] opacity-60 truncate">{log.description}</p>
+              </div>
+              <div className="text-right shrink-0">
+                <p className="text-[var(--md-sys-typescale-label-small-size)] opacity-40 font-mono">{formatTime(log.created_at)}</p>
+              </div>
+            </div>
+          )) : (
+            <p className="p-8 text-center opacity-40 italic">暂无系统操作记录</p>
+          )}
+        </div>
+      </section>
     </div>
   );
 }

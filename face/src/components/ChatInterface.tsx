@@ -4,10 +4,13 @@
  */
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Loader2, RefreshCw, Upload, Database, Trash2, FileText } from 'lucide-react';
+import { Send, Loader2, RefreshCw, Database, Trash2, FileText, Plus, Mic, Bot } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useChatStore } from '../stores/useChatStore';
 import { useH3Store } from '../stores/useH3Store';
+import api from '../lib/api';
+import GlassCard from './layout/GlassCard';
+import Button from './ui/Button';
 
 interface MemoryStats {
   total_documents: number;
@@ -17,7 +20,7 @@ interface MemoryStats {
 
 export default function ChatInterface() {
   // Zustand Stores
-  const { messages, isStreaming, error, addMessage, setStreaming, setError } = useChatStore();
+  const { messages, isStreaming, error, addMessage, updateLastMessage, setStreaming, setError } = useChatStore();
   const { scores } = useH3Store();
 
   // Local UI State
@@ -32,7 +35,9 @@ export default function ChatInterface() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
   };
 
   useEffect(() => {
@@ -45,11 +50,8 @@ export default function ChatInterface() {
 
   const fetchMemoryStats = async () => {
     try {
-      const response = await fetch('/api/memory/stats');
-      if (response.ok) {
-        const stats = await response.json();
-        setMemoryStats(stats);
-      }
+      const stats = await api.get<MemoryStats>('/memory/stats');
+      setMemoryStats(stats);
     } catch (err) {
       console.error('获取记忆统计失败:', err);
     }
@@ -58,9 +60,10 @@ export default function ChatInterface() {
   const handleSend = async () => {
     if (!input.trim() || isStreaming) return;
 
+    const query = input.trim();
     const userMessage = {
       role: 'user' as const,
-      content: input.trim(),
+      content: query,
       timestamp: Date.now(),
     };
 
@@ -69,56 +72,39 @@ export default function ChatInterface() {
     setStreaming(true);
     setError(null);
 
+    // 先添加一个空的助手消息，准备接收流
+    addMessage({
+      role: 'assistant',
+      content: '',
+      timestamp: Date.now(),
+    });
+
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000);
-
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      await api.stream(
+        '/chat/send',
+        {
+          message: query,
+          context: {
+            h3_state: scores
+          },
+          stream: true
         },
-        body: JSON.stringify({
-          query: userMessage.content,
-          context: '',
-          h3_state: scores, // 注入 H3 状态
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-
-      addMessage({
-        role: 'assistant',
-        content: data.response,
-        timestamp: Date.now(),
-      });
+        (chunk) => {
+          if (chunk.type === 'content' && chunk.content) {
+            updateLastMessage(chunk.content);
+          } else if (chunk.type === 'error') {
+            setError(chunk.content || '生成出错');
+          }
+        }
+      );
     } catch (err) {
       console.error('Error sending message:', err);
-      let errorMessage = '连接失败';
-      
-      if (err instanceof Error) {
-        if (err.name === 'AbortError') {
-          errorMessage = '请求超时，请稍后重试';
-        } else {
-          errorMessage = err.message;
-        }
-      }
+      const errorMessage = err instanceof Error ? err.message : '发送失败，请检查网络连接';
       
       setError(errorMessage);
       setIsConnected(false);
       
-      addMessage({
-        role: 'assistant',
-        content: `抱歉，发生了错误：${errorMessage}`,
-        timestamp: Date.now(),
-      });
+      updateLastMessage(`\n\n抱歉，发生了错误：${errorMessage}`);
     } finally {
       setStreaming(false);
     }
@@ -131,33 +117,24 @@ export default function ChatInterface() {
     }
   };
 
-  const handleRetry = () => {
+  const handleRetry = async () => {
     setError(null);
     setIsConnected(true);
-    addMessage({
-      role: 'assistant',
-      content: '正在重新连接...',
-      timestamp: Date.now(),
-    });
     
-    setTimeout(async () => {
-      try {
-        const response = await fetch('/api/health');
-        if (response.ok) {
-          setIsConnected(true);
-          // 这里不再删除最后一条消息，而是直接提示成功
-          addMessage({
-            role: 'assistant',
-            content: '连接成功！',
-            timestamp: Date.now(),
-          });
-        } else {
-          throw new Error('后端服务不可用');
-        }
-      } catch (err) {
-        setError('无法连接到后端服务');
+    try {
+      const response: any = await api.get('/health');
+      if (response.status === 'ok') {
+        setIsConnected(true);
+        addMessage({
+          role: 'assistant',
+          content: '系统连接已恢复。',
+          timestamp: Date.now(),
+        });
       }
-    }, 500);
+    } catch (err) {
+      setError('无法连接到大脑服务');
+      setIsConnected(false);
+    }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -191,42 +168,26 @@ export default function ChatInterface() {
     if (uploadedFiles.length === 0) return;
 
     setIsTraining(true);
-    const filePaths: string[] = [];
+    const filenames: string[] = [];
 
     try {
       for (const file of uploadedFiles) {
         const formData = new FormData();
         formData.append('file', file);
 
-        const response = await fetch('/api/upload', {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (response.ok) {
-          const result = await response.json();
-          filePaths.push(result.file_path);
+        const result: any = await api.post('/archives/upload', formData);
+        if (result.filename) {
+          filenames.push(result.filename);
         }
       }
 
-      if (filePaths.length > 0) {
-        const trainResponse = await fetch('/api/train', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ file_paths: filePaths }),
+      if (filenames.length > 0) {
+        addMessage({
+          role: 'assistant',
+          content: `文件上传成功。如果是聊天记录 JSON 文件，已自动进行拆分。你可以在“记忆图谱”页面手动选择并开始训练。`,
+          timestamp: Date.now(),
         });
-
-        if (trainResponse.ok) {
-          const trainResult = await trainResponse.json();
-          addMessage({
-            role: 'assistant',
-            content: `记忆训练完成！成功处理 ${trainResult.success} 个文件，失败 ${trainResult.failed} 个。`,
-            timestamp: Date.now(),
-          });
-          await fetchMemoryStats();
-        }
+        await fetchMemoryStats();
       }
     } catch (err) {
       console.error('上传文件失败:', err);
@@ -241,261 +202,244 @@ export default function ChatInterface() {
     }
   };
 
-  const handleClearMemory = async () => {
-    if (!confirm('确定要清空所有记忆吗？此操作不可恢复。')) return;
-
-    try {
-      const response = await fetch('/api/memory/clear', {
-        method: 'DELETE',
-      });
-
-      if (response.ok) {
-        addMessage({
-          role: 'assistant',
-          content: '记忆已清空',
-          timestamp: Date.now(),
-        });
-        await fetchMemoryStats();
-      }
-    } catch (err) {
-      console.error('清空记忆失败:', err);
-    }
-  };
-
-  const removeFile = (index: number) => {
-    setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
-  };
-
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-100 flex items-center justify-center p-6">
-      <div className="w-full max-w-6xl bg-white/90 backdrop-blur-2xl rounded-3xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <div className="flex items-center space-x-3">
-            <div className="flex items-center space-x-2">
-              <div className={clsx(
-                'w-3 h-3 rounded-full',
-                isConnected ? 'bg-green-500' : 'bg-red-500'
-              )} />
-              <span className="text-sm text-gray-600">
-                {isConnected ? '大脑在线' : '大脑离线'}
-              </span>
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* 顶部状态栏 */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-white/10 bg-black/20">
+        <div className="flex items-center space-x-2">
+          <Bot className="w-5 h-5 text-primary-400" />
+          <h2 className="text-sm font-medium text-white/90">数字分身 - Architect</h2>
+          {!isConnected && (
+            <div className="flex items-center space-x-1 px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 text-[10px]">
+              <span className="w-1 h-1 rounded-full bg-red-500 animate-pulse" />
+              <span>连接断开</span>
             </div>
-            <h1 className="text-2xl font-bold text-gray-800">
-              Endgame OS
-            </h1>
-          </div>
-          <div className="flex items-center space-x-3">
-            <button
-              onClick={() => setShowMemoryPanel(!showMemoryPanel)}
-              className="flex items-center space-x-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors text-gray-700"
-            >
-              <Database size={18} />
-              <span className="text-sm">记忆</span>
-              {memoryStats && (
-                <span className="ml-2 px-2 py-0.5 bg-blue-500/20 text-blue-600 rounded-full text-xs">
-                  {memoryStats.total_documents}
-                </span>
-              )}
-            </button>
-            {error && (
-              <button
-                onClick={handleRetry}
-                className="flex items-center space-x-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                <RefreshCw size={16} />
-                <span>重试连接</span>
-              </button>
+          )}
+        </div>
+        
+        <div className="flex items-center space-x-2">
+          <Button 
+            variant="text" 
+            onClick={() => setShowMemoryPanel(!showMemoryPanel)}
+            className={clsx("p-1.5 h-10 w-10", showMemoryPanel && "bg-white/10")}
+            icon={<Database className="w-4 h-4" />}
+          >
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+        {/* 聊天消息区域 */}
+        <div className="flex-1 flex flex-col min-w-0 relative">
+          <div 
+            className={clsx(
+              "flex-1 overflow-y-auto px-4 py-6 space-y-6 scrollbar-hide",
+              isDragging && "bg-primary-500/5 ring-2 ring-primary-500/30 ring-inset"
             )}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            {messages.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-center space-y-4 opacity-50 px-8">
+                <div className="p-4 rounded-full bg-white/5 border border-white/10">
+                  <Bot className="w-8 h-8 text-primary-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-medium text-white">开始对话</h3>
+                  <p className="text-sm text-white/60 max-w-xs mt-1">
+                    我是你的数字分身 Architect。我们可以讨论你的终局愿景、项目进度或任何你想聊的话题。
+                  </p>
+                </div>
+              </div>
+            ) : (
+              messages.map((msg, idx) => (
+                <div 
+                  key={idx} 
+                  className={clsx(
+                    "flex w-full",
+                    msg.role === 'user' ? "justify-end" : "justify-start"
+                  )}
+                >
+                  <div className={clsx(
+                    "max-w-[85%] flex space-x-3",
+                    msg.role === 'user' && "flex-row-reverse space-x-reverse"
+                  )}>
+                    <div className={clsx(
+                      "flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center border",
+                      msg.role === 'user' 
+                        ? "bg-primary-500/20 border-primary-500/30 text-primary-400" 
+                        : "bg-white/5 border-white/10 text-white/60"
+                    )}>
+                      {msg.role === 'user' ? <Mic className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+                    </div>
+                    <div className={clsx(
+                      "px-4 py-3 rounded-2xl text-sm leading-relaxed",
+                      msg.role === 'user' 
+                        ? "bg-primary-600/20 border border-primary-500/30 text-white/90 rounded-tr-none" 
+                        : "bg-white/5 border border-white/10 text-white/80 rounded-tl-none"
+                    )}>
+                      <div className="prose prose-invert prose-sm max-w-none">
+                        <ReactMarkdown>
+                          {msg.content}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+            
+            {isStreaming && (
+              <div className="flex justify-start">
+                <div className="flex space-x-3">
+                  <div className="w-8 h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-white/60">
+                    <Bot className="w-4 h-4" />
+                  </div>
+                  <div className="bg-white/5 border border-white/10 px-4 py-3 rounded-2xl rounded-tl-none">
+                    <div className="flex space-x-1.5 items-center h-5">
+                      <span className="w-1.5 h-1.5 bg-primary-400/60 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                      <span className="w-1.5 h-1.5 bg-primary-400/60 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                      <span className="w-1.5 h-1.5 bg-primary-400/60 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {error && !isStreaming && (
+              <div className="flex flex-col items-center justify-center p-4 space-y-3 bg-red-500/10 border border-red-500/20 rounded-xl">
+                <p className="text-xs text-red-400">{error}</p>
+                <Button 
+                  variant="outlined" 
+                  onClick={handleRetry} 
+                  className="text-xs h-8 px-3"
+                  icon={<RefreshCw className="w-3 h-3" />}
+                >
+                  重试连接
+                </Button>
+              </div>
+            )}
+            
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* 输入区域 */}
+          <div className="p-4 bg-gradient-to-t from-black/40 to-transparent">
+            {uploadedFiles.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-3">
+                {uploadedFiles.map((file, i) => (
+                  <div key={i} className="flex items-center space-x-2 px-2 py-1 bg-white/5 border border-white/10 rounded-lg text-[10px] text-white/60">
+                    <FileText className="w-3 h-3" />
+                    <span className="truncate max-w-[100px]">{file.name}</span>
+                    <button onClick={() => setUploadedFiles(prev => prev.filter((_, idx) => idx !== i))}>
+                      <Trash2 className="w-3 h-3 hover:text-red-400" />
+                    </button>
+                  </div>
+                ))}
+                <Button 
+                  onClick={handleUploadFiles} 
+                  disabled={isTraining}
+                  className="text-[10px] h-8 px-2"
+                  variant="tonal"
+                  icon={isTraining ? <Loader2 className="w-3 h-3 animate-spin" /> : <Database className="w-3 h-3" />}
+                >
+                  加入记忆
+                </Button>
+              </div>
+            )}
+
+            <GlassCard className="flex items-end space-x-2 p-2 focus-within:ring-1 ring-primary-500/30 transition-all">
+              <button 
+                className="p-2 text-white/40 hover:text-white/70 transition-colors"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Plus className="w-5 h-5" />
+              </button>
+              <input 
+                type="file" 
+                ref={fileInputRef} 
+                className="hidden" 
+                multiple 
+                onChange={handleFileSelect}
+              />
+              
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyPress}
+                placeholder="与 Architect 交流..."
+                rows={1}
+                className="flex-1 bg-transparent border-none focus:ring-0 text-sm text-white/90 placeholder:text-white/30 py-2 resize-none max-h-32"
+                style={{ height: 'auto' }}
+              />
+              
+              <Button 
+                onClick={handleSend} 
+                disabled={!input.trim() || isStreaming}
+                className={clsx(
+                  "p-2 rounded-xl transition-all",
+                  input.trim() ? "bg-primary-600 hover:bg-primary-500 shadow-lg shadow-primary-900/20" : "bg-white/5"
+                )}
+              >
+                {isStreaming ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+              </Button>
+            </GlassCard>
           </div>
         </div>
 
+        {/* 记忆面板 (右侧侧边栏) */}
         {showMemoryPanel && (
-          <div className="border-b border-gray-200 p-6 bg-gray-50">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-gray-800">记忆管理</h3>
-                <button
-                  onClick={handleClearMemory}
-                  className="flex items-center space-x-2 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-600 rounded-lg transition-colors text-sm"
-                >
-                  <Trash2 size={14} />
-                  <span>清空记忆</span>
-                </button>
-              </div>
-
-              <div
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                className={clsx(
-                  'border-2 border-dashed rounded-xl p-8 text-center transition-all',
-                  isDragging ? 'border-blue-500 bg-blue-500/10' : 'border-gray-300 hover:border-gray-400'
-                )}
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  accept=".pdf,.md,.txt,.json"
-                  onChange={handleFileSelect}
-                  className="hidden"
+          <div className="w-64 border-l border-white/10 bg-black/40 p-4 flex flex-col space-y-4 overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">记忆统计</h3>
+              <div className="flex items-center space-x-1">
+                <Button 
+                  variant="text" 
+                  onClick={fetchMemoryStats}
+                  className="h-8 w-8 p-0"
+                  icon={<RefreshCw className={clsx("w-4 h-4", isTraining && "animate-spin")} />}
                 />
-                <Upload className="mx-auto mb-4 text-gray-500" size={48} />
-                <p className="text-gray-600 mb-2">拖拽文件到此处，或点击上传</p>
-                <p className="text-sm text-gray-500 mb-4">支持 PDF、Markdown、TXT、JSON 格式</p>
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+                <Button 
+                  variant="text" 
+                  onClick={() => setShowMemoryPanel(false)}
+                  className="h-8 px-2"
                 >
-                  选择文件
-                </button>
+                  关闭
+                </Button>
               </div>
-
-              {uploadedFiles.length > 0 && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-gray-500">已选择 {uploadedFiles.length} 个文件</span>
-                    <button
-                      onClick={handleUploadFiles}
-                      disabled={isTraining}
-                      className={clsx(
-                        'px-4 py-2 rounded-lg transition-colors',
-                        isTraining
-                          ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                          : 'bg-green-600 hover:bg-green-700 text-white'
-                      )}
-                    >
-                      {isTraining ? (
-                        <>
-                          <Loader2 size={16} className="animate-spin inline mr-2" />
-                          训练中...
-                        </>
-                      ) : (
-                        '开始训练'
-                      )}
-                    </button>
-                  </div>
-                  <div className="space-y-1">
-                    {uploadedFiles.map((file, index) => (
-                      <div
-                        key={index}
-                        className="flex items-center justify-between px-3 py-2 bg-gray-100 rounded-lg"
-                      >
-                        <div className="flex items-center space-x-2">
-                          <FileText size={16} className="text-gray-500" />
-                          <span className="text-sm text-gray-700">{file.name}</span>
-                          <span className="text-xs text-gray-500">({(file.size / 1024).toFixed(1)} KB)</span>
-                        </div>
-                        <button
-                          onClick={() => removeFile(index)}
-                          className="text-gray-500 hover:text-red-500 transition-colors"
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
-                  </div>
+            </div>
+            
+            {memoryStats ? (
+              <div className="space-y-3">
+                <div className="p-3 bg-white/5 rounded-xl border border-white/10">
+                  <p className="text-[10px] text-white/40">已存文档</p>
+                  <p className="text-xl font-semibold text-primary-400">{memoryStats.total_documents}</p>
                 </div>
-              )}
+                <div className="p-3 bg-white/5 rounded-xl border border-white/10">
+                  <p className="text-[10px] text-white/40">向量库状态</p>
+                  <p className="text-xs text-white/80 mt-1">已激活 (ChromaDB)</p>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center p-8">
+                <Loader2 className="w-5 h-5 animate-spin text-white/20" />
+              </div>
+            )}
+            
+            <div className="pt-4 border-t border-white/5">
+              <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">知识库操作</h3>
+              <div className="space-y-2">
+                <Button variant="text" className="w-full justify-start text-xs text-white/60 hover:text-white h-8 px-2" icon={<FileText className="w-3.5 h-3.5" />}>
+                  查看所有文档
+                </Button>
+                <Button variant="text" className="w-full justify-start text-xs text-white/60 hover:text-white h-8 px-2" icon={<RefreshCw className="w-3.5 h-3.5" />}>
+                  重新构建索引
+                </Button>
+              </div>
             </div>
           </div>
         )}
-
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {messages.length === 0 && (
-            <div className="h-full flex flex-col items-center justify-center text-gray-500">
-              <div className="text-center space-y-4">
-                <div className="flex justify-center mb-4">
-                  <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
-                </div>
-                <p className="text-lg">开始与你的数字分身对话...</p>
-                <p className="text-sm text-gray-400">我是你的终局架构师，准备好聆听你的想法</p>
-                {memoryStats && memoryStats.total_documents > 0 && (
-                  <p className="text-sm text-blue-500 mt-4">
-                    我已经记住了 {memoryStats.total_documents} 个知识点
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          {messages.map((message, index) => (
-            <div
-              key={index}
-              className={clsx(
-                'flex mb-4',
-                message.role === 'user' ? 'justify-end' : 'justify-start'
-              )}
-            >
-              <div className="flex items-end space-x-2 mb-1">
-                {message.role === 'assistant' && (
-                  <span className="text-xs text-gray-400">
-                    {new Date(message.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                )}
-              </div>
-              <div
-                className={clsx(
-                  'max-w-[80%] rounded-2xl px-5 py-4 shadow-lg',
-                  message.role === 'user'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-white text-gray-800 border border-gray-200'
-                )}
-              >
-                {message.role === 'assistant' ? (
-                  <div className="prose prose-sm max-w-none">
-                    <ReactMarkdown>{message.content}</ReactMarkdown>
-                  </div>
-                ) : (
-                  <p className="whitespace-pre-wrap text-white">{message.content}</p>
-                )}
-              </div>
-            </div>
-          ))}
-
-          {isStreaming && (
-            <div className="flex justify-start mb-4">
-              <div className="bg-white text-gray-800 rounded-2xl px-5 py-4 border border-gray-200">
-                <div className="flex items-center space-x-3">
-                  <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
-                  <span className="text-gray-500">正在思考...</span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div ref={messagesEndRef} />
-        </div>
-
-        <div className="border-t border-gray-200 p-4 bg-gray-50">
-          <div className="flex items-center space-x-3">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder="输入你的问题..."
-              className="flex-1 bg-white text-gray-900 placeholder-gray-400 rounded-xl px-5 py-4 outline-none focus:ring-2 focus:ring-blue-500/50 transition-all border border-gray-300"
-              disabled={isStreaming || !isConnected}
-            />
-            <button
-              onClick={handleSend}
-              disabled={!input.trim() || isStreaming || !isConnected}
-              className={clsx(
-                'p-4 rounded-xl transition-colors',
-                input.trim() && !isStreaming && isConnected
-                  ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-500/20'
-                  : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-              )}
-            >
-              {isStreaming ? (
-                <Loader2 size={20} className="animate-spin" />
-              ) : (
-                <Send size={20} />
-              )}
-            </button>
-          </div>
-        </div>
       </div>
     </div>
   );

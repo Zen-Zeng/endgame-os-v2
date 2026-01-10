@@ -17,6 +17,8 @@ import {
 import { useOnboardingStore } from '../../stores/useOnboardingStore';
 import type { H3InitialState } from '../../stores/useOnboardingStore';
 import { useH3Store } from '../../stores/useH3Store';
+import GlassCard from '../../components/layout/GlassCard';
+import Button from '../../components/ui/Button';
 import clsx from 'clsx';
 
 // H3 维度配置
@@ -357,65 +359,110 @@ export default function H3OnboardingPage() {
     );
   }
 
+  const totalSteps = questions.length + 1;
+  const step = showResult ? totalSteps : currentQuestion + 1;
+  const DimensionIcon = question.dimension ? dimensions[question.dimension].icon : Sparkles;
+
   return (
-    <div className="onboarding-page">
-      <div className="onboarding-background">
-        <div className="onboarding-gradient" />
-        <div className="onboarding-orb onboarding-orb-1" />
-        <div className="onboarding-orb onboarding-orb-2" />
+    <div className="min-h-screen bg-[var(--md-sys-color-background)] flex flex-col p-6 lg:p-12 relative overflow-hidden">
+      {/* 装饰背景 */}
+      <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-[var(--md-sys-color-primary)] opacity-5 blur-[120px] rounded-full -z-10" />
+      <div className="absolute bottom-0 left-0 w-[500px] h-[500px] bg-[var(--md-sys-color-secondary)] opacity-5 blur-[120px] rounded-full -z-10" />
+
+      {/* 顶部导航 */}
+      <div className="max-w-4xl mx-auto w-full flex justify-between items-center mb-12">
+        <div className="flex items-center gap-4">
+          <div className="w-10 h-10 rounded-xl bg-[var(--md-sys-color-primary)] flex items-center justify-center text-white">
+            <Flame size={24} />
+          </div>
+          <h1 className="text-2xl font-black tracking-tighter">能量校准</h1>
+        </div>
+        
+        {/* 进度指示器 */}
+        <div className="flex items-center gap-2">
+          {Array.from({ length: questions.length }).map((_, i) => (
+            <div 
+              key={i} 
+              className={clsx(
+                "h-1.5 rounded-full transition-all duration-500",
+                i === currentQuestion ? "w-8 bg-[var(--md-sys-color-primary)]" : 
+                i < currentQuestion ? "w-4 bg-[var(--md-sys-color-primary)] opacity-30" : "w-4 bg-[var(--md-sys-color-outline-variant)]"
+              )}
+            />
+          ))}
+        </div>
       </div>
 
-      <div className="onboarding-container">
-        {/* 进度和维度指示 */}
-        <div className="h3-header">
-          <div className="h3-progress-bar">
-            <div className="h3-progress-fill" style={{ width: `${progress}%` }} />
-          </div>
-          <div className="h3-progress-info">
-            <span className="h3-question-count">{currentQuestion + 1} / {questions.length}</span>
-            <div 
-              className="h3-dimension-badge"
-              style={{ 
-                backgroundColor: `${dimensions[question.dimension].color}20`,
-                color: dimensions[question.dimension].color 
-              }}
-            >
-              {dimensions[question.dimension].name}
+      <main className="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-center">
+        <GlassCard className="p-10 border-[var(--md-sys-color-outline-variant)]">
+          <div className="animate-fade-in space-y-10">
+            <div className="flex items-center gap-4">
+              <div 
+                className="w-12 h-12 rounded-xl flex items-center justify-center text-white shadow-lg"
+                style={{ backgroundColor: question.dimension === 'mind' ? 'var(--color-h3-mind)' : 
+                                      question.dimension === 'body' ? 'var(--color-h3-body)' :
+                                      question.dimension === 'spirit' ? 'var(--color-h3-spirit)' : 
+                                      'var(--color-h3-vocation)' }}
+              >
+                <DimensionIcon size={24} />
+              </div>
+              <div>
+                <h3 className="text-xs font-bold opacity-50 uppercase tracking-widest">
+                  {dimensions[question.dimension].name}维度校准
+                </h3>
+                <p className="text-sm opacity-30 font-medium">问题 {currentQuestion + 1} / {questions.length}</p>
+              </div>
+            </div>
+
+            <div className="space-y-8">
+              <h2 className="text-3xl font-black tracking-tighter leading-snug">
+                {question.text}
+              </h2>
+
+              <div className="grid gap-3">
+                {question.options.map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => handleAnswer(option.value)}
+                    className={clsx(
+                      "w-full p-6 rounded-2xl border text-left transition-all group relative overflow-hidden",
+                      answers[question.id] === option.value
+                        ? "bg-[var(--md-sys-color-primary-container)] border-[var(--md-sys-color-primary)]"
+                        : "bg-[var(--md-sys-color-surface-container-low)] border-[var(--md-sys-color-outline-variant)] hover:bg-[var(--md-sys-color-surface-container-high)]"
+                    )}
+                  >
+                    <div className="flex items-center justify-between relative z-10">
+                      <span className={clsx(
+                        "font-bold transition-colors",
+                        answers[question.id] === option.value ? "text-[var(--md-sys-color-on-primary-container)]" : "text-[var(--md-sys-color-on-surface)]"
+                      )}>
+                        {option.label}
+                      </span>
+                      {answers[question.id] === option.value && (
+                        <CheckCircle size={20} className="text-[var(--md-sys-color-primary)]" />
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
 
-        {/* 问题卡片 */}
-        <div className="h3-question-card animate-fade-in-up" key={question.id}>
-          <h2 className="h3-question-text">{question.text}</h2>
-
-          <div className="h3-options">
-            {question.options.map((option) => (
-              <button
-                key={option.value}
-                onClick={() => handleAnswer(option.value)}
-                className={clsx(
-                  'h3-option',
-                  answers[question.id] === option.value && 'h3-option-selected'
-                )}
-              >
-                <span className="h3-option-label">{option.label}</span>
-                {answers[question.id] === option.value && (
-                  <CheckCircle size={20} className="h3-option-check" />
-                )}
-              </button>
-            ))}
+          {/* 底部按钮 */}
+          <div className="flex justify-between items-center mt-12 pt-8 border-t border-[var(--md-sys-color-outline-variant)]">
+            <button
+              onClick={handleBack}
+              disabled={currentQuestion === 0}
+              className={clsx(
+                "flex items-center gap-2 px-6 py-3 rounded-xl font-bold transition-all",
+                currentQuestion === 0 ? "opacity-0 pointer-events-none" : "opacity-50 hover:opacity-100"
+              )}
+            >
+              <ArrowLeft size={20} /> 返回
+            </button>
           </div>
-        </div>
-
-        {/* 导航 */}
-        {currentQuestion > 0 && (
-          <button onClick={handleBack} className="h3-back-btn">
-            <ArrowLeft size={20} />
-            上一题
-          </button>
-        )}
-      </div>
+        </GlassCard>
+      </main>
     </div>
   );
 }

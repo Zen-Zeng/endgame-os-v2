@@ -1,21 +1,24 @@
-/**
- * MemoryGraph 组件
- * 用于可视化调试图数据库中的知识图谱
- */
 import { useEffect, useState, useRef } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import api from '../lib/api';
+import { ZoomIn, ZoomOut, RefreshCw, Maximize2, X, Activity, Share2 } from 'lucide-react';
+import Button from './ui/Button';
+import GlassCard from './layout/GlassCard';
 
 interface Node {
   id: string;
   group: string;
   label: string;
-  data: any;
+  type?: string;
+  name?: string;
+  data?: any;
+  x?: number;
+  y?: number;
 }
 
 interface Link {
-  source: string;
-  target: string;
+  source: any;
+  target: any;
   type: string;
   data: any;
 }
@@ -36,74 +39,124 @@ export default function MemoryGraph({ onClose }: MemoryGraphProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const graphRef = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  // 节点颜色映射
+  // 监听容器大小变化
+  useEffect(() => {
+    if (containerRef.current) {
+      const updateSize = () => {
+        if (containerRef.current) {
+          setDimensions({
+            width: containerRef.current.clientWidth,
+            height: containerRef.current.clientHeight
+          });
+        }
+      };
+
+      const resizeObserver = new ResizeObserver(updateSize);
+      resizeObserver.observe(containerRef.current);
+      updateSize();
+
+      return () => resizeObserver.disconnect();
+    }
+  }, []);
+
+  // 获取解析后的颜色 (用于 Canvas)
+  const resolveColor = (colorStr: string): string => {
+    if (colorStr.startsWith('var(')) {
+      const varName = colorStr.match(/var\(([^)]+)\)/)?.[1];
+      if (varName && typeof window !== 'undefined') {
+        const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+        if (value) return value;
+      }
+    }
+    
+    // 回退颜色
+    const fallbacks: { [key: string]: string } = {
+      '--md-sys-color-primary': '#D0BCFF',
+      '--md-sys-color-secondary': '#CCC2DC',
+      '--md-sys-color-tertiary': '#EFB8C8',
+      '--md-sys-color-error': '#F2B8B5',
+      '--md-sys-color-primary-fixed': '#EADDFF',
+      '--md-sys-color-secondary-fixed': '#E8DEF8',
+      '--md-sys-color-outline': '#938F99'
+    };
+    
+    const varName = colorStr.match(/var\(([^)]+)\)/)?.[1];
+    return (varName && fallbacks[varName]) || '#938F99';
+  };
+
+  // 节点颜色映射 - 与 MemoryPage.tsx 中的 nodeTypes 同步
   const getNodeColor = (node: Node): string => {
     const colorMap: { [key: string]: string } = {
-      'User': '#FF6B6B',
-      'Goal': '#4ECDC4',
-      'Project': '#45B7D1',
-      'Task': '#96CEB4',
-      'Log': '#FFEAA7',
-      'Concept': '#DDA0DD',
-      'Unknown': '#95A5A6'
+      'User': 'var(--md-sys-color-primary)',
+      'Goal': 'var(--md-sys-color-secondary)',
+      'Project': 'var(--md-sys-color-tertiary)',
+      'Task': 'var(--md-sys-color-error)',
+      'Log': 'var(--md-sys-color-primary-fixed)',
+      'Concept': 'var(--md-sys-color-secondary-fixed)',
+      '1': 'var(--md-sys-color-primary)', 
+      '2': 'var(--md-sys-color-secondary)',
+      '3': 'var(--md-sys-color-tertiary)',
+      '4': 'var(--md-sys-color-error)',
+      '5': 'var(--md-sys-color-primary-fixed)',
+      'Unknown': 'var(--md-sys-color-outline)'
     };
-    return colorMap[node.group] || colorMap['Unknown'];
+    const groupKey = node.group?.toString() || node.type || 'Unknown';
+    return colorMap[groupKey] || colorMap['Unknown'];
   };
 
   // 节点大小映射
   const getNodeSize = (node: Node): number => {
     const sizeMap: { [key: string]: number } = {
-      'User': 20,
-      'Goal': 15,
-      'Project': 12,
-      'Task': 10,
-      'Log': 8,
-      'Concept': 6
+      'User': 12,
+      'Goal': 10,
+      'Project': 8,
+      'Task': 7,
+      'Log': 5,
+      'Concept': 4,
+      '1': 12,
+      '2': 10,
+      '3': 8,
+      '4': 7,
+      '5': 5
     };
-    return sizeMap[node.group] || 8;
+    const groupKey = node.group?.toString() || node.type || 'Unknown';
+    return sizeMap[groupKey] || 5;
   };
 
-  // 提取通用的数据加载和过滤逻辑
   const loadGraphData = async () => {
     try {
       setLoading(true);
       setError(null);
-      
       const data: any = await api.get('/memory/graph');
-      console.log('原始图数据:', data);
+      const result = data.data || data;
+      const nodes = Array.isArray(result.nodes) ? result.nodes : [];
+      const links = Array.isArray(result.links) ? result.links : [];
       
-      if (data && data.nodes && data.links) {
-        const nodeIds = new Set(data.nodes.map((n: any) => n.id));
-        const validLinks = data.links.filter((l: any) => {
-          const sourceId = typeof l.source === 'object' ? l.source.id : l.source;
-          const targetId = typeof l.target === 'object' ? l.target.id : l.target;
-          
-          const sourceExists = nodeIds.has(sourceId);
-          const targetExists = nodeIds.has(targetId);
-          
-          if (!sourceExists || !targetExists) {
-            console.warn(`过滤无效连线: ${sourceId} -> ${targetId} (节点不存在)`);
-          }
-          
-          return sourceExists && targetExists;
-        });
-        
-        setGraphData({
-          nodes: data.nodes,
-          links: validLinks,
-          total_nodes: data.nodes.length,
-          total_links: validLinks.length
-        });
-      } else if (data) {
-        setGraphData({
-          nodes: data.nodes || [],
-          links: data.links || [],
-          total_nodes: data.nodes?.length || 0,
-          total_links: data.links?.length || 0
-        });
-      }
+      const processedNodes = nodes.map((node: any, index: number) => ({
+        ...node,
+        id: node.id?.toString() || `node-${index}`,
+        group: node.group?.toString() || 'Unknown',
+        label: node.name || node.label || `Node ${index}`,
+        type: node.type,
+        data: node.data || { "描述": node.content || "无详细内容" }
+      }));
+
+      const processedLinks = links.map((link: any) => ({
+        ...link,
+        source: link.source?.toString(),
+        target: link.target?.toString()
+      }));
+      
+      setGraphData({
+        nodes: processedNodes,
+        links: processedLinks,
+        total_nodes: processedNodes.length,
+        total_links: processedLinks.length
+      });
     } catch (err) {
       console.error('加载图数据失败:', err);
       setError(err instanceof Error ? err.message : '未知错误');
@@ -112,60 +165,60 @@ export default function MemoryGraph({ onClose }: MemoryGraphProps) {
     }
   };
 
-  // 加载图数据
   useEffect(() => {
     loadGraphData();
   }, []);
 
-  // 处理节点点击
+  // 当数据加载完成后，强制图谱自适应视野
+  useEffect(() => {
+    if (graphData.nodes.length > 0 && graphRef.current) {
+      setTimeout(() => {
+        graphRef.current.zoomToFit(400);
+      }, 500);
+    }
+  }, [graphData]);
+
   const handleNodeClick = (node: Node) => {
     setSelectedNode(node);
-    console.log('选中节点:', node);
   };
 
-  // 处理背景点击（取消选择）
   const handleBackgroundClick = () => {
     setSelectedNode(null);
   };
 
-  // 刷新数据
   const handleRefresh = () => {
     loadGraphData();
   };
 
-  // 缩放视图
-  const handleZoomIn = () => {
-    if (graphRef.current) {
-      graphRef.current.zoom(1.2);
-    }
-  };
+  const handleZoomIn = () => graphRef.current?.zoom(1.2);
+  const handleZoomOut = () => graphRef.current?.zoom(0.8);
+  const handleResetZoom = () => graphRef.current?.zoomToFit(400);
 
-  const handleZoomOut = () => {
-    if (graphRef.current) {
-      graphRef.current.zoom(0.8);
+  // 颜色处理工具
+  const applyAlpha = (color: string, alpha: number): string => {
+    if (color.startsWith('#')) {
+      const r = parseInt(color.slice(1, 3), 16);
+      const g = parseInt(color.slice(3, 5), 16);
+      const b = parseInt(color.slice(5, 7), 16);
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
-  };
-
-  const handleResetZoom = () => {
-    if (graphRef.current) {
-      graphRef.current.zoomToFit(400);
+    if (color.startsWith('var(')) {
+      const resolved = resolveColor(color);
+      return applyAlpha(resolved, alpha);
     }
+    return color;
   };
 
   if (loading) {
     return (
-      <div className="memory-graph-container">
-        <div className="memory-graph-header">
-          <h2>知识图谱可视化</h2>
-          {onClose && (
-            <button className="close-button" onClick={onClose}>
-              关闭
-            </button>
-          )}
+      <div className="h-full w-full flex flex-col bg-[var(--md-sys-color-surface-container-low)]">
+        <div className="flex items-center justify-between p-4 border-b border-[var(--md-sys-color-outline-variant)]">
+          <h2 className="text-lg font-bold text-[var(--md-sys-color-on-surface)]">知识图谱可视化</h2>
+          {onClose && <Button variant="text" onClick={onClose} icon={<X size={18} />} />}
         </div>
-        <div className="memory-graph-loading">
-          <div className="spinner"></div>
-          <p>加载图数据中...</p>
+        <div className="flex-1 flex flex-col items-center justify-center">
+          <div className="w-12 h-12 border-4 border-[var(--md-sys-color-primary-container)] border-t-[var(--md-sys-color-primary)] rounded-full animate-spin mb-4"></div>
+          <p className="text-[var(--md-sys-color-on-surface-variant)]">加载图数据中...</p>
         </div>
       </div>
     );
@@ -173,368 +226,151 @@ export default function MemoryGraph({ onClose }: MemoryGraphProps) {
 
   if (error) {
     return (
-      <div className="memory-graph-container">
-        <div className="memory-graph-header">
-          <h2>知识图谱可视化</h2>
-          {onClose && (
-            <button className="close-button" onClick={onClose}>
-              关闭
-            </button>
-          )}
+      <div className="h-full w-full flex flex-col bg-[var(--md-sys-color-surface-container-low)]">
+        <div className="flex items-center justify-between p-4 border-b border-[var(--md-sys-color-outline-variant)]">
+          <h2 className="text-lg font-bold text-[var(--md-sys-color-on-surface)]">知识图谱可视化</h2>
+          {onClose && <Button variant="text" onClick={onClose} icon={<X size={18} />} />}
         </div>
-        <div className="memory-graph-error">
-          <p>加载失败: {error}</p>
-          <button className="refresh-button" onClick={handleRefresh}>
+        <div className="flex-1 flex flex-col items-center justify-center p-8">
+          <p className="text-[var(--md-sys-color-error)] mb-4 text-center">加载失败: {error}</p>
+          <Button variant="filled" onClick={handleRefresh} icon={<RefreshCw size={18} />}>
             重试
-          </button>
+          </Button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="memory-graph-container">
-      <div className="memory-graph-header">
-        <h2>知识图谱可视化</h2>
-        <div className="memory-graph-stats">
-          <span>节点: {graphData.nodes?.length || 0}</span>
-          <span>连线: {graphData.links?.length || 0}</span>
+    <div className="h-full w-full flex flex-col relative bg-white/40 backdrop-blur-sm overflow-hidden rounded-[var(--md-sys-shape-corner-extra-large)] border border-white/20 shadow-inner">
+      {/* 图谱 Header */}
+      <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between p-6 bg-gradient-to-b from-white/60 to-transparent pointer-events-none">
+        <div className="flex flex-col">
+          <h2 className="text-xl font-bold text-[var(--md-sys-color-on-surface)] flex items-center gap-2 drop-shadow-sm">
+            <Share2 size={24} className="text-[var(--md-sys-color-primary)]" />
+            知识图谱可视化
+          </h2>
+          <div className="flex items-center gap-3 mt-2">
+            <span className="text-[10px] font-bold text-[var(--md-sys-color-on-surface-variant)] bg-black/5 px-2 py-0.5 rounded-full flex items-center gap-1 uppercase tracking-wider border border-black/5">
+              <Activity size={10} />
+              节点: {graphData.nodes?.length || 0}
+            </span>
+            <span className="text-[10px] font-bold text-[var(--md-sys-color-on-surface-variant)] bg-black/5 px-2 py-0.5 rounded-full uppercase tracking-wider border border-black/5">
+              连线: {graphData.links?.length || 0}
+            </span>
+          </div>
         </div>
-        <div className="memory-graph-controls">
-          <button className="control-button" onClick={handleRefresh} title="刷新">
-            🔄
-          </button>
-          <button className="control-button" onClick={handleZoomIn} title="放大">
-            🔍+
-          </button>
-          <button className="control-button" onClick={handleZoomOut} title="缩小">
-            🔍-
-          </button>
-          <button className="control-button" onClick={handleResetZoom} title="重置视图">
-            🎯
-          </button>
-          {onClose && (
-            <button className="close-button" onClick={onClose}>
-              关闭
-            </button>
-          )}
+        
+        <div className="flex items-center gap-2 pointer-events-auto">
+          <Button variant="tonal" onClick={handleRefresh} icon={<RefreshCw size={18} />} className="bg-black/5 hover:bg-black/10 border-none text-[var(--md-sys-color-on-surface)] h-10 w-10 p-0 rounded-full" />
+          <Button variant="tonal" onClick={handleZoomIn} icon={<ZoomIn size={18} />} className="bg-black/5 hover:bg-black/10 border-none text-[var(--md-sys-color-on-surface)] h-10 w-10 p-0 rounded-full" />
+          <Button variant="tonal" onClick={handleZoomOut} icon={<ZoomOut size={18} />} className="bg-black/5 hover:bg-black/10 border-none text-[var(--md-sys-color-on-surface)] h-10 w-10 p-0 rounded-full" />
+          <Button variant="tonal" onClick={handleResetZoom} icon={<Maximize2 size={18} />} className="bg-black/5 hover:bg-black/10 border-none text-[var(--md-sys-color-on-surface)] h-10 w-10 p-0 rounded-full" />
+          {onClose && <Button variant="tonal" onClick={onClose} icon={<X size={18} />} className="bg-black/5 hover:bg-black/10 border-none text-[var(--md-sys-color-on-surface)] h-10 w-10 p-0 ml-2 rounded-full" />}
         </div>
       </div>
 
-      <div className="memory-graph-content">
-        <div className="graph-legend">
-          <h3>图例</h3>
-          <div className="legend-items">
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#FF6B6B' }}></span>
-              <span>User</span>
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#4ECDC4' }}></span>
-              <span>Goal</span>
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#45B7D1' }}></span>
-              <span>Project</span>
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#96CEB4' }}></span>
-              <span>Task</span>
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#FFEAA7' }}></span>
-              <span>Log</span>
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#DDA0DD' }}></span>
-              <span>Concept</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="graph-wrapper">
-          {(!graphData.nodes || graphData.nodes.length === 0) ? (
-            <div className="empty-graph">
-              <p>暂无图数据</p>
-              <p className="hint">请先添加一些记忆数据</p>
-            </div>
-          ) : (
-            <ForceGraph2D
-              ref={graphRef}
-              graphData={graphData}
-              nodeLabel={(node: Node) => node.label}
-              nodeColor={(node: Node) => getNodeColor(node)}
-              nodeVal={(node: Node) => getNodeSize(node)}
-              linkLabel={(link: Link) => link.type}
-              linkDirectionalArrowLength={3}
-              linkDirectionalArrowRelPos={1}
-              onNodeClick={handleNodeClick}
-              onBackgroundClick={handleBackgroundClick}
-              width={800}
-              height={600}
-              cooldownTicks={100}
-              onEngineStop={() => {
-                if (graphRef.current) {
-                  graphRef.current.zoomToFit(400);
-                }
-              }}
-            />
-          )}
-        </div>
-
+      {/* 节点详情浮窗 */}
         {selectedNode && (
-          <div className="node-details-panel">
-            <div className="panel-header">
-              <h3>节点详情</h3>
-              <button className="close-panel-button" onClick={() => setSelectedNode(null)}>
-                ✕
-              </button>
-            </div>
-            <div className="panel-content">
-              <div className="detail-item">
-                <span className="detail-label">ID:</span>
-                <span className="detail-value">{selectedNode.id}</span>
+          <div className="absolute bottom-8 left-8 z-20 w-80 pointer-events-auto animate-in fade-in slide-in-from-bottom-4 duration-300">
+            <GlassCard variant="elevated" padding="md" className="border border-white/20 shadow-2xl backdrop-blur-2xl bg-white/70">
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <span 
+                    className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full mb-2 inline-block border border-current"
+                    style={{ backgroundColor: `${getNodeColor(selectedNode)}20`, color: getNodeColor(selectedNode) }}
+                  >
+                    {selectedNode.group}
+                  </span>
+                  <h3 className="text-lg font-bold text-[var(--md-sys-color-on-surface)] leading-tight">{selectedNode.label}</h3>
+                </div>
+                <button onClick={() => setSelectedNode(null)} className="text-[var(--md-sys-color-on-surface-variant)]/40 hover:text-[var(--md-sys-color-on-surface)] transition-colors p-1">
+                  <X size={18} />
+                </button>
               </div>
-              <div className="detail-item">
-                <span className="detail-label">类型:</span>
-                <span className="detail-value">{selectedNode.group}</span>
-              </div>
-              <div className="detail-item">
-                <span className="detail-label">标签:</span>
-                <span className="detail-value">{selectedNode.label}</span>
-              </div>
-              {selectedNode.data && (
-                <div className="detail-item">
-                  <span className="detail-label">数据:</span>
-                  <pre className="detail-data">
-                    {JSON.stringify(selectedNode.data, null, 2)}
-                  </pre>
+              
+              <div className="space-y-4 max-h-60 overflow-y-auto pr-2 scrollbar-hide">
+                {selectedNode.data && Object.entries(selectedNode.data).map(([key, value]) => (
+                  <div key={key} className="text-xs">
+                    <span className="text-[var(--md-sys-color-on-surface-variant)]/60 font-medium block mb-1 uppercase tracking-tighter">{key}</span>
+                    <span className="text-[var(--md-sys-color-on-surface)] block break-words bg-black/5 p-2 rounded border border-black/5 leading-relaxed">{String(value)}</span>
+                  </div>
+                ))}
+              {(!selectedNode.data || Object.keys(selectedNode.data).length === 0) && (
+                <div className="flex flex-col items-center justify-center py-6 text-white/20 italic">
+                  <Activity size={24} className="mb-2 opacity-10" />
+                  <p className="text-xs">暂无详细元数据</p>
                 </div>
               )}
             </div>
-          </div>
+          </GlassCard>
+        </div>
+      )}
+
+      {/* 核心图谱 */}
+      <div ref={containerRef} className="flex-1 cursor-grab active:cursor-grabbing overflow-hidden">
+        {dimensions.width > 0 && dimensions.height > 0 && (
+          <ForceGraph2D
+            ref={graphRef}
+            graphData={graphData}
+            width={dimensions.width}
+            height={dimensions.height}
+            nodeLabel="label"
+            nodeColor={(node: any) => resolveColor(getNodeColor(node))}
+            nodeRelSize={1}
+            nodeVal={getNodeSize}
+            linkColor={() => 'rgba(0, 0, 0, 0.08)'}
+            linkWidth={1}
+            linkDirectionalParticles={1}
+            linkDirectionalParticleSpeed={0.005}
+            linkDirectionalParticleWidth={1.5}
+            backgroundColor="transparent"
+            onNodeClick={handleNodeClick}
+            onBackgroundClick={handleBackgroundClick}
+            nodeCanvasObject={(node: any, ctx, globalScale) => {
+              if (node.x === undefined || node.y === undefined) return;
+              
+              const label = node.label;
+              const fontSize = 12 / globalScale;
+              const color = getNodeColor(node);
+              const size = getNodeSize(node);
+
+              // 绘制节点发光层
+              ctx.beginPath();
+              ctx.arc(node.x, node.y, size * 1.5, 0, 2 * Math.PI, false);
+              const gradient = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, size * 1.5);
+              gradient.addColorStop(0, applyAlpha(color, 0.4));
+              gradient.addColorStop(1, applyAlpha(color, 0));
+              ctx.fillStyle = gradient;
+              ctx.fill();
+
+              // 绘制节点主体
+              ctx.beginPath();
+              ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
+              ctx.fillStyle = color;
+              ctx.fill();
+
+              // 绘制选中高亮
+              if (selectedNode?.id === node.id) {
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, size * 1.8, 0, 2 * Math.PI, false);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx.lineWidth = 2 / globalScale;
+                ctx.stroke();
+              }
+
+              // 绘制文字 (高缩放比例时显示)
+              if (globalScale > 2) {
+                ctx.font = `500 ${fontSize}px var(--md-ref-typeface-plain)`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                ctx.fillText(label, node.x, node.y + size + fontSize + 4);
+              }
+            }}
+          />
         )}
       </div>
-
-      <style>{`
-        .memory-graph-container {
-          width: 100%;
-          height: 100vh;
-          display: flex;
-          flex-direction: column;
-          background: #1a1a2e;
-          color: #eee;
-        }
-
-        .memory-graph-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 1rem 2rem;
-          background: #16213e;
-          border-bottom: 2px solid #0f3460;
-        }
-
-        .memory-graph-header h2 {
-          margin: 0;
-          font-size: 1.5rem;
-          color: #e94560;
-        }
-
-        .memory-graph-stats {
-          display: flex;
-          gap: 2rem;
-          font-size: 0.9rem;
-        }
-
-        .memory-graph-controls {
-          display: flex;
-          gap: 0.5rem;
-        }
-
-        .control-button,
-        .close-button,
-        .refresh-button {
-          padding: 0.5rem 1rem;
-          background: #0f3460;
-          color: #eee;
-          border: 1px solid #e94560;
-          border-radius: 4px;
-          cursor: pointer;
-          font-size: 1rem;
-          transition: all 0.3s;
-        }
-
-        .control-button:hover,
-        .close-button:hover,
-        .refresh-button:hover {
-          background: #e94560;
-          transform: scale(1.05);
-        }
-
-        .memory-graph-content {
-          flex: 1;
-          display: flex;
-          overflow: hidden;
-        }
-
-        .graph-legend {
-          width: 150px;
-          padding: 1rem;
-          background: #16213e;
-          border-right: 2px solid #0f3460;
-          overflow-y: auto;
-        }
-
-        .graph-legend h3 {
-          margin-top: 0;
-          font-size: 1rem;
-          color: #e94560;
-        }
-
-        .legend-items {
-          display: flex;
-          flex-direction: column;
-          gap: 0.5rem;
-        }
-
-        .legend-item {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          font-size: 0.85rem;
-        }
-
-        .legend-color {
-          width: 16px;
-          height: 16px;
-          border-radius: 50%;
-          border: 2px solid #eee;
-        }
-
-        .graph-wrapper {
-          flex: 1;
-          position: relative;
-          background: #0f0f23;
-        }
-
-        .memory-graph-loading,
-        .memory-graph-error {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          justify-content: center;
-          align-items: center;
-          gap: 1rem;
-        }
-
-        .spinner {
-          width: 50px;
-          height: 50px;
-          border: 4px solid #0f3460;
-          border-top: 4px solid #e94560;
-          border-radius: 50%;
-          animation: spin 1s linear infinite;
-        }
-
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-
-        .empty-graph {
-          display: flex;
-          flex-direction: column;
-          justify-content: center;
-          align-items: center;
-          height: 100%;
-          color: #666;
-        }
-
-        .empty-graph .hint {
-          font-size: 0.85rem;
-          margin-top: 0.5rem;
-        }
-
-        .node-details-panel {
-          position: absolute;
-          top: 1rem;
-          right: 1rem;
-          width: 300px;
-          max-height: 400px;
-          background: #16213e;
-          border: 2px solid #e94560;
-          border-radius: 8px;
-          overflow-y: auto;
-          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-          z-index: 1000;
-        }
-
-        .panel-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 0.75rem 1rem;
-          background: #0f3460;
-          border-bottom: 2px solid #e94560;
-        }
-
-        .panel-header h3 {
-          margin: 0;
-          font-size: 1rem;
-          color: #e94560;
-        }
-
-        .close-panel-button {
-          background: none;
-          border: none;
-          color: #eee;
-          font-size: 1.2rem;
-          cursor: pointer;
-          padding: 0;
-          width: 24px;
-          height: 24px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .close-panel-button:hover {
-          color: #e94560;
-        }
-
-        .panel-content {
-          padding: 1rem;
-        }
-
-        .detail-item {
-          margin-bottom: 1rem;
-        }
-
-        .detail-label {
-          display: block;
-          font-weight: bold;
-          color: #e94560;
-          margin-bottom: 0.25rem;
-          font-size: 0.85rem;
-        }
-
-        .detail-value {
-          color: #eee;
-          word-break: break-word;
-        }
-
-        .detail-data {
-          background: #0f0f23;
-          padding: 0.5rem;
-          border-radius: 4px;
-          font-size: 0.75rem;
-          overflow-x: auto;
-          margin: 0;
-          max-height: 200px;
-          overflow-y: auto;
-        }
-      `}</style>
     </div>
   );
 }

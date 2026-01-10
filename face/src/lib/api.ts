@@ -3,6 +3,9 @@
  * 处理与 Brain 后端的通信
  */
 
+// 自动检测基础 URL
+// 如果在 5173 (Vite) 下运行，利用 vite.config.ts 的代理
+// 如果在 8888 (FastAPI) 下运行，直接使用相对路径
 const API_BASE = '/api/v1';
 
 interface RequestOptions extends RequestInit {
@@ -20,10 +23,24 @@ class ApiClient {
       const authData = localStorage.getItem('endgame-auth');
       if (authData) {
         const parsed = JSON.parse(authData);
+        // Zustand persist 存储结构是 { state: { ..., token: "..." }, version: 0 }
         this.token = parsed.state?.token || null;
       }
     } catch (e) {
       console.error('Failed to load token from storage:', e);
+    }
+  }
+
+  // 辅助方法：手动更新 token（用于 store 中登录成功后立即更新）
+  updateToken() {
+    try {
+      const authData = localStorage.getItem('endgame-auth');
+      if (authData) {
+        const parsed = JSON.parse(authData);
+        this.token = parsed.state?.token || null;
+      }
+    } catch (e) {
+      console.error('Failed to update token:', e);
     }
   }
 
@@ -41,7 +58,21 @@ class ApiClient {
   private getHeaders(options?: RequestOptions): HeadersInit {
     const headers: Record<string, string> = {};
 
-    const token = options?.token || this.token;
+    // 优先使用选项中的 token，否则从 localStorage 实时获取最新的 token
+    let token = options?.token;
+    
+    if (!token) {
+      try {
+        const authData = localStorage.getItem('endgame-auth');
+        if (authData) {
+          const parsed = JSON.parse(authData);
+          token = parsed.state?.token || null;
+        }
+      } catch (e) {
+        console.error('Failed to load token for request:', e);
+      }
+    }
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -54,7 +85,20 @@ class ApiClient {
     
     // 权限校验拦截 (排除登录和注册接口)
     const isPublic = endpoint.includes('/auth/login') || endpoint.includes('/auth/register');
-    const token = options.token || this.token;
+    
+    // 获取最新 token
+    let token = options.token;
+    if (!token) {
+      try {
+        const authData = localStorage.getItem('endgame-auth');
+        if (authData) {
+          const parsed = JSON.parse(authData);
+          token = parsed.state?.token || null;
+        }
+      } catch (e) {
+        console.error('Failed to load token for request check:', e);
+      }
+    }
     
     if (!isPublic && !token) {
       throw new Error('未登录或登录已过期');
@@ -110,18 +154,38 @@ class ApiClient {
   }
 
   async put<T>(endpoint: string, data?: unknown, options?: RequestOptions): Promise<T> {
+    const isFormData = data instanceof FormData;
+    const headers: Record<string, string> = {};
+    if (!isFormData) {
+      headers['Content-Type'] = 'application/json';
+    }
+
     return this.request<T>(endpoint, {
       ...options,
       method: 'PUT',
-      body: data ? JSON.stringify(data) : undefined,
+      headers: {
+        ...headers,
+        ...(options?.headers as Record<string, string> || {}),
+      },
+      body: isFormData ? (data as FormData) : (data ? JSON.stringify(data) : undefined),
     });
   }
 
   async patch<T>(endpoint: string, data?: unknown, options?: RequestOptions): Promise<T> {
+    const isFormData = data instanceof FormData;
+    const headers: Record<string, string> = {};
+    if (!isFormData) {
+      headers['Content-Type'] = 'application/json';
+    }
+
     return this.request<T>(endpoint, {
       ...options,
       method: 'PATCH',
-      body: data ? JSON.stringify(data) : undefined,
+      headers: {
+        ...headers,
+        ...(options?.headers as Record<string, string> || {}),
+      },
+      body: isFormData ? (data as FormData) : (data ? JSON.stringify(data) : undefined),
     });
   }
 
@@ -166,21 +230,26 @@ class ApiClient {
     }
 
     const decoder = new TextDecoder();
+    let buffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const text = decoder.decode(value);
-      const lines = text.split('\n');
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      
+      // 保留最后一行（可能不完整）
+      buffer = lines.pop() || '';
 
       for (const line of lines) {
+        if (line.trim() === '') continue;
         if (line.startsWith('data: ')) {
           try {
             const data = JSON.parse(line.slice(6));
             onChunk(data);
-          } catch {
-            // Ignore parse errors
+          } catch (e) {
+            console.warn('SSE Parse Error:', e, line);
           }
         }
       }

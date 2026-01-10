@@ -14,6 +14,7 @@ from ..models.h3 import (
 from ..models.user import User
 from .auth import require_user
 from pydantic import BaseModel
+from ..core.db import db_manager
 
 router = APIRouter()
 
@@ -42,25 +43,12 @@ class H3EntryResponse(BaseModel):
     note: str
 
 
-# ============ 模拟数据存储 ============
-
-_h3_energy_db: dict[str, List[dict]] = {}  # user_id -> [H3Energy]
-_h3_calibrations_db: dict[str, List[dict]] = {}  # user_id -> [H3Calibration]
-
-
-# ============ 辅助函数 ============
+# ============ 数据访问层 (重构为持久化存储) ============
 
 def _get_user_energy_history(user_id: str, days: int = 7) -> List[H3Energy]:
-    """获取用户能量历史"""
-    history = _h3_energy_db.get(user_id, [])
-    cutoff = date.today() - timedelta(days=days)
-    
-    filtered = [
-        H3Energy(**e) for e in history
-        if datetime.fromisoformat(str(e["date"])).date() >= cutoff
-    ]
-    
-    return sorted(filtered, key=lambda x: x.date)
+    """获取用户能量历史 (从数据库读取)"""
+    history_data = db_manager.get_h3_energy_history(user_id, days)
+    return [H3Energy(**e) for e in history_data]
 
 
 def _calculate_trend(values: List[int]) -> float:
@@ -133,20 +121,19 @@ def _generate_alerts(energy: H3Energy, history: List[H3Energy]) -> List[H3Alert]
 @router.get("/current", response_model=H3Energy)
 async def get_current_energy(user: User = Depends(require_user)):
     """
-    获取当前（今日）能量状态
+    获取当前（今日）能量状态。如果没有今日记录，则返回最新的一条记录。
     """
-    history = _h3_energy_db.get(user.id, [])
-    today = date.today()
+    history = db_manager.get_h3_energy_history(user.id, 1)
     
-    # 查找今日记录
-    for energy in history:
-        if datetime.fromisoformat(str(energy["date"])).date() == today:
-            return H3Energy(**energy)
+    if history:
+        # 如果有记录，直接返回最新的（无论是今天的还是之前的）
+        # 这样可以保证 UI 的连续性，而不是突然跳回 50
+        return H3Energy(**history[0])
     
-    # 没有今日记录，返回默认值
+    # 没有任何历史记录，返回默认值
     return H3Energy(
         user_id=user.id,
-        date=today,
+        date=date.today(),
         mind=50,
         body=50,
         spirit=50,
@@ -167,7 +154,7 @@ async def get_energy_history(
 
 @router.get("/trend", response_model=H3Trend)
 async def get_energy_trend(
-    period: str = Query(default="7d", regex="^(7d|30d|90d)$"),
+    period: str = Query(default="7d", pattern="^(7d|30d|90d)$"),
     user: User = Depends(require_user)
 ):
     """
@@ -213,6 +200,7 @@ async def calibrate_energy(
     """
     today = date.today()
     
+    now = datetime.now()
     # 创建能量快照
     energy = H3Energy(
         user_id=user.id,
@@ -221,23 +209,11 @@ async def calibrate_energy(
         body=request.body,
         spirit=request.spirit,
         vocation=request.vocation,
-        created_at=datetime.now()
+        created_at=now
     )
     
     # 保存能量数据
-    if user.id not in _h3_energy_db:
-        _h3_energy_db[user.id] = []
-    
-    # 更新或添加今日记录
-    updated = False
-    for i, e in enumerate(_h3_energy_db[user.id]):
-        if datetime.fromisoformat(str(e["date"])).date() == today:
-            _h3_energy_db[user.id][i] = energy.model_dump()
-            updated = True
-            break
-    
-    if not updated:
-        _h3_energy_db[user.id].append(energy.model_dump())
+    db_manager.save_h3_energy(user.id, energy.model_dump())
     
     # 创建校准记录
     calibration = H3Calibration(
@@ -248,13 +224,11 @@ async def calibrate_energy(
         blockers=request.blockers,
         wins=request.wins,
         calibration_type="manual",
-        created_at=datetime.now()
+        created_at=now
     )
     
     # 保存校准记录
-    if user.id not in _h3_calibrations_db:
-        _h3_calibrations_db[user.id] = []
-    _h3_calibrations_db[user.id].append(calibration.model_dump())
+    db_manager.save_h3_calibration(calibration.model_dump())
     
     return calibration
 
@@ -267,13 +241,8 @@ async def get_calibrations(
     """
     获取校准历史记录
     """
-    calibrations = _h3_calibrations_db.get(user.id, [])
-    sorted_cals = sorted(
-        calibrations,
-        key=lambda x: x["created_at"],
-        reverse=True
-    )
-    return [H3Calibration(**c) for c in sorted_cals[:limit]]
+    calibrations = db_manager.get_h3_calibrations(user.id, limit)
+    return [H3Calibration(**c) for c in calibrations]
 
 
 @router.post("/initialize")
@@ -299,9 +268,7 @@ async def initialize_h3(
     )
     
     # 保存数据
-    if user.id not in _h3_energy_db:
-        _h3_energy_db[user.id] = []
-    _h3_energy_db[user.id].append(energy.model_dump())
+    db_manager.save_h3_energy(user.id, energy.model_dump())
     
     return {
         "entry": {
@@ -335,19 +302,8 @@ async def update_h3(
         created_at=created_at
     )
     
-    # 更新今日数据
-    if user.id not in _h3_energy_db:
-        _h3_energy_db[user.id] = []
-    
-    updated = False
-    for i, e in enumerate(_h3_energy_db[user.id]):
-        if datetime.fromisoformat(str(e["date"])).date() == today:
-            _h3_energy_db[user.id][i] = energy.model_dump()
-            updated = True
-            break
-            
-    if not updated:
-        _h3_energy_db[user.id].append(energy.model_dump())
+    # 更新数据
+    db_manager.save_h3_energy(user.id, energy.model_dump())
         
     return {
         "entry": {
