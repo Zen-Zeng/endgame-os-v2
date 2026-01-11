@@ -162,21 +162,23 @@ export default function ChatPage() {
               )}>
                 <div className={clsx(
                   "w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center mt-1",
-                  msg.role === 'user' ? "bg-[var(--md-sys-color-secondary-container)] text-[var(--md-sys-color-on-secondary-container)]" : "bg-[var(--md-sys-color-surface-container-highest)] text-[var(--md-sys-color-primary)]"
+                  msg.role === 'user' 
+                    ? "bg-[var(--md-sys-color-primary-container)] text-[var(--md-sys-color-on-primary-container)]" 
+                    : "bg-[var(--md-sys-color-surface-variant)] text-[var(--md-sys-color-on-surface-variant)]"
                 )}>
                   {msg.role === 'user' ? <User size={16} /> : <Bot size={16} />}
                 </div>
                 
                 <div className={clsx(
-                  "px-4 py-3 rounded-[var(--md-sys-shape-corner-large)] text-[var(--md-sys-typescale-body-large-size)] leading-relaxed",
+                  "px-4 py-3 rounded-[var(--md-sys-shape-corner-large)] text-[var(--md-sys-typescale-body-large-size)] leading-relaxed shadow-sm transition-colors",
                   msg.role === 'user' 
-                    ? "bg-[var(--md-sys-color-primary)] text-[var(--md-sys-color-on-primary)] rounded-tr-none" 
-                    : "bg-[var(--md-sys-color-surface-container-high)] text-[var(--md-sys-color-on-surface)] rounded-tl-none"
+                    ? "bg-[var(--md-sys-color-primary-container)] text-[var(--md-sys-color-on-primary-container)] rounded-tr-none" 
+                    : "bg-[var(--md-sys-color-surface-variant)] text-[var(--md-sys-color-on-surface-variant)] rounded-tl-none border border-[var(--md-sys-color-outline-variant)]/30"
                 )}>
                   {msg.role === 'user' ? (
                      msg.content
                    ) : (
-                     <div className="prose prose-sm prose-invert max-w-none">
+                     <div className="prose prose-sm prose-invert max-w-none text-[var(--md-sys-color-on-surface-variant)]">
                        <ReactMarkdown>
                          {msg.content}
                        </ReactMarkdown>

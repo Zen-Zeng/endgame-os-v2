@@ -17,6 +17,7 @@ from .memory import router as memory_router
 from .persona import router as persona_router
 from .goals import router as goals_router
 from .links import router as links_router
+from .strategic import router as strategic_router
 
 # 注册子路由
 @api_router.get("/", tags=["基础"])
@@ -37,6 +38,7 @@ api_router.include_router(memory_router, prefix="/memory", tags=["记忆"])
 api_router.include_router(persona_router, prefix="/persona", tags=["人格"])
 api_router.include_router(goals_router, prefix="/goals", tags=["目标管理"])
 api_router.include_router(links_router, prefix="/links", tags=["神经链接"])
+api_router.include_router(strategic_router, prefix="/graph", tags=["战略图谱"])
 
 __all__ = ["api_router"]
 

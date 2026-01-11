@@ -179,20 +179,32 @@ class MemoryService:
             embeddings=[embedding]
         )
         
-        # 3. 提取结构化记忆 (左脑)
-        structured_data = await self.neural_processor.extract_structured_memory(combined_text)
+        # 3. 提取结构化记忆 (左脑) - [Strategic Brain] 注入 user_id
+        structured_data = await self.neural_processor.extract_structured_memory(combined_text, user_id=user_id)
         entities = structured_data.get("entities", [])
         relations = structured_data.get("relations", [])
 
         if entities:
             logger.info(f"从对话中提取到 {len(entities)} 个实体")
+            
+            # [Strategic Brain] 自动标记状态
+            # Self/Vision/Goal/Project/Concept 通常可以直接确认
+            # Task/Person 建议进入 pending
+            for e in entities:
+                if e.get("type") in ["Task", "Person"] and e.get("status") is None:
+                    e["status"] = "pending"
+                elif e.get("status") is None:
+                    e["status"] = "confirmed"
+                    
             self.graph_store.upsert_entities_batch(user_id, entities)
             
             # 自动关联实体与当前对话的向量
             concepts_with_vectors = []
             for e in entities:
-                cid = self.graph_store._get_stable_id(e["name"])
-                concepts_with_vectors.append({"id": cid, "name": e["name"], "vector": embedding})
+                # 只有 confirmed 的节点才建立向量索引，避免垃圾数据污染检索
+                if e.get("status") == "confirmed":
+                    cid = self.graph_store._get_stable_id(e["name"])
+                    concepts_with_vectors.append({"id": cid, "name": e["name"], "vector": embedding})
             
             if concepts_with_vectors:
                 self.graph_store.add_concepts_batch(user_id, concepts_with_vectors)

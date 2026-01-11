@@ -42,11 +42,32 @@ class GraphStore:
                         name TEXT,
                         content TEXT,
                         attributes JSON,
+                        status TEXT DEFAULT 'confirmed',
+                        time_metadata JSON,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
+                
+                # [Strategic Brain] 自动迁移：检查并添加 status 和 time_metadata 列
+                try:
+                    # 检查 status 列
+                    cursor = conn.execute("PRAGMA table_info(nodes)")
+                    columns = [row['name'] for row in cursor.fetchall()]
+                    
+                    if 'status' not in columns:
+                        logger.info("Migrating database: Adding 'status' column to nodes table...")
+                        conn.execute("ALTER TABLE nodes ADD COLUMN status TEXT DEFAULT 'confirmed'")
+                        
+                    if 'time_metadata' not in columns:
+                        logger.info("Migrating database: Adding 'time_metadata' column to nodes table...")
+                        conn.execute("ALTER TABLE nodes ADD COLUMN time_metadata JSON")
+                        
+                except Exception as e:
+                    logger.warning(f"Database migration check warning: {e}")
+
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_user ON nodes(user_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);")
                 # 边表 - 增加 user_id 并修改主键
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS edges (
@@ -64,18 +85,48 @@ class GraphStore:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_user ON edges(user_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);")
+
+                # 3. 经验表 (存储进化出来的智慧)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS experiences (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        trigger_scenario TEXT,
+                        insight TEXT,
+                        strategy TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_experiences_user ON experiences(user_id);")
             logger.info(f"SQLite GraphStore 初始化成功: {self.db_path}")
         except Exception as e:
             logger.error(f"SQLite 初始化失败: {e}")
             raise
 
     # --- 通用写入 ---
-    def _upsert_node(self, conn, user_id, node_id, node_type, name="", content="", **kwargs):
+    def _upsert_node(self, conn, user_id, node_id, node_type, name="", content="", status="confirmed", time_metadata=None, **kwargs):
         attributes = json.dumps(kwargs, ensure_ascii=False)
-        conn.execute(
-            "INSERT OR REPLACE INTO nodes (id, user_id, type, name, content, attributes) VALUES (?, ?, ?, ?, ?, ?)",
-            (node_id, user_id, node_type, name, content, attributes)
-        )
+        time_meta_json = json.dumps(time_metadata, ensure_ascii=False) if time_metadata else None
+        
+        # 检查表是否有新列，如果没有则添加（为了兼容旧库）
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO nodes (id, user_id, type, name, content, attributes, status, time_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (node_id, user_id, node_type, name, content, attributes, status, time_meta_json)
+            )
+        except sqlite3.OperationalError:
+            # 如果是旧表结构，先尝试添加列
+            try:
+                conn.execute("ALTER TABLE nodes ADD COLUMN status TEXT DEFAULT 'confirmed'")
+                conn.execute("ALTER TABLE nodes ADD COLUMN time_metadata JSON")
+                # 重试插入
+                conn.execute(
+                    "INSERT OR REPLACE INTO nodes (id, user_id, type, name, content, attributes, status, time_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (node_id, user_id, node_type, name, content, attributes, status, time_meta_json)
+                )
+            except Exception as e:
+                logger.error(f"Schema migration failed: {e}")
+                raise
 
     def _upsert_edge(self, conn, user_id, source, target, relation, **kwargs):
         props = json.dumps(kwargs, ensure_ascii=False)
@@ -92,8 +143,64 @@ class GraphStore:
                 if not cursor.fetchone():
                     logger.warning("检测到数据库表缺失，正在初始化...")
                     self._init_db()
+                
+                # 额外检查 experiences 表 (针对迁移场景)
+                cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='experiences'")
+                if not cursor.fetchone():
+                    logger.warning("检测到 experiences 表缺失，正在初始化...")
+                    self._init_db()
         except Exception as e:
             logger.error(f"检查表结构失败: {e}")
+
+    def sync_user_to_self_node(self, user_id: str, vision_data: Optional[Dict[str, Any]] = None):
+        """
+        [Strategic Brain] 核心方法：确保 User 配置同步到图谱的 Self 节点
+        """
+        try:
+            self._ensure_tables()
+            with self._lock, self._get_conn() as conn:
+                # 1. 确保 Self 节点存在
+                self._upsert_node(
+                    conn, 
+                    user_id, 
+                    user_id, # Self 节点的 ID 就是 user_id
+                    "Self", 
+                    name="Me", 
+                    content="The Owner of this Endgame OS",
+                    status="confirmed"
+                )
+                
+                # 2. 如果有愿景数据，同步 Vision 节点
+                if vision_data:
+                    vision_id = f"vision_{user_id}"
+                    # 提取时间元数据
+                    time_meta = {
+                        "start_date": vision_data.get("chapter_start_date"),
+                        "target_date": vision_data.get("target_date")
+                    }
+                    
+                    self._upsert_node(
+                        conn,
+                        user_id,
+                        vision_id,
+                        "Vision",
+                        name=vision_data.get("title", "My Vision"),
+                        content=vision_data.get("description", ""),
+                        status="confirmed",
+                        time_metadata=time_meta,
+                        # 额外属性
+                        core_values=vision_data.get("core_values", []),
+                        milestones=vision_data.get("key_milestones", [])
+                    )
+                    
+                    # 3. 建立 Self -> OWNS -> Vision 关系
+                    self._upsert_edge(conn, user_id, user_id, vision_id, "OWNS")
+                    
+            logger.info(f"User {user_id} sync to Self/Vision nodes completed.")
+            return True
+        except Exception as e:
+            logger.error(f"Sync User to Self Node Failed: {e}")
+            return False
 
     # --- 核心业务接口 ---
     def add_log(self, user_id: str, log_id: str, content: str, timestamp: str, log_type: str = "chat") -> bool:
@@ -250,6 +357,28 @@ class GraphStore:
             logger.error(f"Add Triplets Batch Failed: {e}")
             return False
 
+    def add_experience(self, user_id: str, exp_id: str, trigger: str, insight: str, strategy: str) -> bool:
+        """记录一条进化出来的经验"""
+        try:
+            self._ensure_tables()
+            with self._lock, self._get_conn() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO experiences (id, user_id, trigger_scenario, insight, strategy) VALUES (?, ?, ?, ?, ?)",
+                    (exp_id, user_id, trigger, insight, strategy)
+                )
+            return True
+        except Exception as e:
+            logger.error(f"添加经验失败: {e}")
+            return False
+
+    def get_all_experiences(self, user_id: str) -> List[Dict[str, Any]]:
+        """获取用户的所有经验"""
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute("SELECT * FROM experiences WHERE user_id = ?", (user_id,)).fetchall()
+                return [dict(row) for row in rows]
+        except Exception: return []
+
     # --- 查询接口 ---
     def get_all_graph_data(self, user_id: str = "default_user", *args, **kwargs) -> Dict[str, Any]:
         """优化：获取特定用户的图谱数据用于前端可视化"""
@@ -306,10 +435,16 @@ class GraphStore:
                         "data": display_data
                     })
 
-                # 2. 获取该用户的边
+                # 2. 获取该用户的边 (增加 LIMIT 并优先返回战略层级关系)
                 if node_ids:
                     placeholders = ','.join('?' * len(node_ids))
-                    query = f"SELECT source, target, relation FROM edges WHERE user_id=? AND (source IN ({placeholders}) OR target IN ({placeholders})) LIMIT 1000"
+                    query = f"""
+                        SELECT source, target, relation 
+                        FROM edges 
+                        WHERE user_id=? AND (source IN ({placeholders}) OR target IN ({placeholders}))
+                        ORDER BY CASE WHEN relation IN ('OWNS', 'DECOMPOSES_TO', 'ACHIEVED_BY', 'CONSISTS_OF') THEN 0 ELSE 1 END, created_at DESC
+                        LIMIT 5000
+                    """
                     params = [actual_user_id] + list(node_ids) + list(node_ids)
                     e_rows = conn.execute(query, params).fetchall()
                     

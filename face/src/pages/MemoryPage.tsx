@@ -30,7 +30,7 @@ import {
   ChevronRight
 } from 'lucide-react';
 import GlassCard from '../components/layout/GlassCard';
-import MemoryGraph from '../components/MemoryGraph';
+import StrategicPixiGraph from '../components/graph/StrategicPixiGraph';
 import Button from '../components/ui/Button';
 import api from '../lib/api';
 import clsx from 'clsx';
@@ -82,17 +82,20 @@ const fileTypeIcons: Record<string, typeof File> = {
 
 // 节点类型配置 - 使用 M3 颜色令牌
 const nodeTypes = [
-  { key: 'User', label: '用户', color: 'var(--md-sys-color-primary)', icon: BrainCircuit },
-  { key: 'Goal', label: '目标', color: 'var(--md-sys-color-secondary)', icon: Target },
-  { key: 'Project', label: '项目', color: 'var(--md-sys-color-tertiary)', icon: Library },
-  { key: 'Task', label: '任务', color: 'var(--md-sys-color-error)', icon: Activity },
-  { key: 'Log', label: '日志', color: 'var(--md-sys-color-primary-fixed)', icon: MessageSquare },
-  { key: 'Concept', label: '概念', color: 'var(--md-sys-color-secondary-fixed)', icon: Share2 },
+  { key: 'Self', label: '我', color: '#6750A4', icon: BrainCircuit },
+  { key: 'Vision', label: '愿景', color: '#B3261E', icon: Target },
+  { key: 'Goal', label: '目标', color: '#E27396', icon: Target },
+  { key: 'Project', label: '项目', color: '#7D5260', icon: Library },
+  { key: 'Task', label: '任务', color: '#605D62', icon: Activity },
+  { key: 'Person', label: '人物', color: '#3F5F90', icon: Share2 },
+  { key: 'Concept', label: '概念', color: '#1D6F42', icon: Share2 },
 ];
 
 export default function MemoryPage() {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
   const [searchQuery, setSearchQuery] = useState('');
+  const [isConsolidating, setIsConsolidating] = useState(false);
+  const [consolidationProgress, setConsolidationProgress] = useState(0);
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
   const [graphStats, setGraphStats] = useState<GraphStats>({ nodes: 0, links: 0 });
   const [recentUpdates, setRecentUpdates] = useState<RecentUpdate[]>([]);
@@ -318,6 +321,45 @@ export default function MemoryPage() {
     }
   };
 
+  // 刷新记忆（语义合并）
+  const handleConsolidate = async () => {
+    if (!window.confirm('是否开始整理记忆？\n系统将自动分析并合并含义相同的重复节点。\n这可能需要几分钟时间。')) return;
+    
+    try {
+      setIsConsolidating(true);
+      setConsolidationProgress(0);
+      const response: any = await api.post('/memory/consolidate');
+      const { task_id } = response;
+      
+      // 轮询进度
+      const pollInterval = setInterval(async () => {
+        try {
+          const status = await api.get<TaskStatus>(`/memory/tasks/${task_id}`);
+          setConsolidationProgress(status.progress);
+          
+          if (status.status === 'completed' || status.status === 'failed') {
+            clearInterval(pollInterval);
+            setIsConsolidating(false);
+            if (status.status === 'completed') {
+              // 刷新图谱
+              window.location.reload(); 
+            } else {
+              alert('整理失败: ' + (status.message || status.error));
+            }
+          }
+        } catch (e) {
+          clearInterval(pollInterval);
+          setIsConsolidating(false);
+        }
+      }, 1000);
+      
+    } catch (err: any) {
+      console.error(err);
+      setIsConsolidating(false);
+      alert('无法启动整理任务');
+    }
+  };
+
   const handleClearMemory = async () => {
     if (!window.confirm('确定要清除所有记忆数据吗？此操作不可撤销。')) {
       return;
@@ -437,6 +479,18 @@ export default function MemoryPage() {
               {showGraph ? '隐藏图谱' : '显示图谱'}
             </Button>
             
+            <button 
+                onClick={handleConsolidate}
+                disabled={isConsolidating}
+                className="relative flex items-center justify-center gap-2 px-6 h-12 rounded-[var(--md-sys-shape-corner-full)] font-bold text-sm tracking-wide transition-all duration-200 active:scale-[0.97] disabled:opacity-40 disabled:pointer-events-none overflow-hidden group bg-[var(--md-sys-color-primary)] text-[var(--md-sys-color-on-primary)] shadow-md hover:shadow-lg"
+            >
+              <div className={`absolute inset-0 bg-white/20 translate-y-full transition-transform duration-300 ${isConsolidating ? 'translate-y-0' : 'group-hover:translate-y-0'}`} style={{ transform: isConsolidating ? `translateY(${100 - consolidationProgress}%)` : undefined }} />
+              <span className={`transition-transform ${isConsolidating ? 'animate-spin' : 'group-hover:rotate-180'}`}>
+                {isConsolidating ? <Loader2 size={18} /> : <RefreshCw size={18} />}
+              </span>
+              <span className="relative z-10">{isConsolidating ? `整理中 ${consolidationProgress}%` : '刷新记忆'}</span>
+            </button>
+
             <Button
               variant="text"
               className="text-[var(--md-sys-color-error)] h-12 px-3"
@@ -755,70 +809,73 @@ export default function MemoryPage() {
         </div>
       </section>
 
-      {/* 知识图谱展示区域 */}
-      <section className={clsx('flex-1 min-h-[600px] flex flex-col gap-4 p-6 border-t border-[var(--md-sys-color-outline-variant)] bg-[var(--md-sys-color-surface-container-lowest)]', showGraph ? 'block' : 'hidden')}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <h2 className="text-lg font-bold text-[var(--md-sys-color-on-surface)] flex items-center gap-2">
-              <BrainCircuit size={20} className="text-[var(--md-sys-color-primary)]" />
-              记忆知识网络
-            </h2>
-            <div className="flex items-center gap-3 px-3 py-1.5 bg-[var(--md-sys-color-surface-container-high)] rounded-full text-xs font-medium">
-              <div className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-[var(--md-sys-color-primary)]" />
-                  <span>{graphStats.nodes} 节点</span>
-              </div>
-              <div className="w-px h-3 bg-[var(--md-sys-color-outline-variant)]" />
-              <div className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-[var(--md-sys-color-secondary)]" />
-                  <span>{graphStats.links} 关联</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-6 bg-[var(--md-sys-color-surface-container-low)] p-4 rounded-[var(--md-sys-shape-corner-large)] border border-[var(--md-sys-color-outline-variant)]/50">
-          <div className="flex-1 relative group">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-[var(--md-sys-color-on-surface-variant)] transition-colors group-focus-within:text-[var(--md-sys-color-primary)]" />
-            <input
-              type="text"
-              placeholder="搜索节点或关联..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full h-11 pl-12 pr-4 rounded-[var(--md-sys-shape-corner-full)] bg-[var(--md-sys-color-surface-container-high)] border-none text-[var(--md-sys-color-on-surface)] placeholder:text-[var(--md-sys-color-on-surface-variant)] focus:ring-2 focus:ring-[var(--md-sys-color-primary)] outline-none transition-all"
-            />
-          </div>
-          
-          <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
-            <div className="flex items-center gap-2 mr-2 text-[var(--md-sys-color-on-surface-variant)]">
-              <Filter size={16} />
-              <span className="text-xs font-medium uppercase tracking-wider">类型过滤</span>
-            </div>
-            {nodeTypes.map((type) => (
-              <button
-                key={type.key}
-                onClick={() => toggleType(type.key)}
-                className={clsx(
-                  'px-4 py-1.5 rounded-[var(--md-sys-shape-corner-full)] text-xs font-medium transition-all flex items-center gap-2 whitespace-nowrap border',
-                  selectedTypes.includes(type.key)
-                    ? 'border-transparent text-[var(--md-sys-color-on-primary)] shadow-sm'
-                    : 'border-[var(--md-sys-color-outline-variant)] text-[var(--md-sys-color-on-surface-variant)] hover:bg-[var(--md-sys-color-surface-container-high)]'
-                )}
-                style={{
-                  backgroundColor: selectedTypes.includes(type.key)
-                    ? type.color
-                    : 'transparent',
-                }}
-              >
-                <type.icon size={14} />
-                {type.label}
-              </button>
-            ))}
-          </div>
-        </div>
+      {/* 知识图谱展示区域 - 无限画布重构 */}
+      <section className={clsx('flex-1 relative min-h-[calc(100vh-140px)] flex flex-col', showGraph ? 'block' : 'hidden')}>
         
-        <div className="flex-1 relative min-h-[500px]">
-          <MemoryGraph onClose={() => setShowGraph(false)} />
+        {/* 核心画布容器 */}
+        <div className="absolute inset-4 bg-[var(--md-sys-color-surface)] border border-[var(--md-sys-color-outline-variant)] rounded-[var(--md-sys-shape-corner-extra-large)] overflow-hidden shadow-sm flex flex-col">
+            
+            {/* 顶部悬浮控制栏 - 绝对定位 */}
+            <div className="absolute top-4 left-4 right-4 z-10 flex justify-between items-start pointer-events-none">
+                
+                {/* 左侧：标题与统计 */}
+                <div className="pointer-events-auto bg-[var(--md-sys-color-surface-container-high)]/90 backdrop-blur-md px-4 py-2 rounded-full border border-[var(--md-sys-color-outline-variant)] shadow-sm flex items-center gap-4 transition-transform hover:scale-105">
+                    <div className="flex items-center gap-2">
+                        <BrainCircuit className="text-[var(--md-sys-color-primary)]" size={18} />
+                        <span className="font-bold text-[var(--md-sys-color-on-surface)] text-sm">战略全景</span>
+                    </div>
+                    <div className="w-px h-4 bg-[var(--md-sys-color-outline-variant)]"></div>
+                    <span className="text-xs text-[var(--md-sys-color-on-surface-variant)] font-mono">
+                        {graphStats.nodes} NODES · {graphStats.links} LINKS
+                    </span>
+                </div>
+
+                {/* 右侧：搜索与过滤 */}
+                <div className="pointer-events-auto flex items-center gap-3">
+                    {/* 搜索栏 */}
+                    <div className="relative group">
+                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                            <Search className="h-4 w-4 text-[var(--md-sys-color-on-surface-variant)] group-focus-within:text-[var(--md-sys-color-primary)] transition-colors" />
+                        </div>
+                        <input
+                            type="text"
+                            placeholder="Search graph..."
+                            className="w-48 focus:w-64 transition-all h-9 pl-9 pr-4 rounded-full bg-[var(--md-sys-color-surface-container-high)]/90 backdrop-blur-md border border-[var(--md-sys-color-outline-variant)] text-sm text-[var(--md-sys-color-on-surface)] placeholder:text-[var(--md-sys-color-on-surface-variant)] focus:ring-2 focus:ring-[var(--md-sys-color-primary)] focus:border-transparent outline-none shadow-sm"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                        />
+                    </div>
+
+                    {/* 过滤器开关 */}
+                    <div className="bg-[var(--md-sys-color-surface-container-high)]/90 backdrop-blur-md p-1 rounded-full border border-[var(--md-sys-color-outline-variant)] shadow-sm flex">
+                         {nodeTypes.slice(0, 4).map(type => (
+                             <button
+                                key={type.key}
+                                onClick={() => toggleType(type.key)}
+                                className={clsx(
+                                    "w-8 h-8 rounded-full flex items-center justify-center transition-all",
+                                    selectedTypes.includes(type.key) 
+                                        ? "bg-[var(--md-sys-color-secondary-container)] text-[var(--md-sys-color-on-secondary-container)] shadow-inner" 
+                                        : "text-[var(--md-sys-color-on-surface-variant)] hover:bg-[var(--md-sys-color-surface-container-highest)]"
+                                )}
+                                title={type.label}
+                             >
+                                 <type.icon size={14} />
+                             </button>
+                         ))}
+                         <div className="w-px h-4 bg-[var(--md-sys-color-outline-variant)] mx-1 self-center"></div>
+                         <button className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--md-sys-color-on-surface-variant)] hover:bg-[var(--md-sys-color-surface-container-highest)]">
+                            <Filter size={14} />
+                         </button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Pixi 画布 */}
+            <div className="flex-1 w-full h-full relative bg-[var(--md-sys-color-surface)]">
+                <StrategicPixiGraph />
+            </div>
+            
         </div>
       </section>
     </div>

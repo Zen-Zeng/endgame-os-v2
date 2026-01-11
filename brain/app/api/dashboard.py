@@ -214,6 +214,8 @@ async def _generate_ai_summary(stats: DashboardStats, user_id: str) -> str:
     return f"{greeting}。{status_msg}"
 
 
+from ..services.neural.processor import get_processor
+
 async def _summarize_vision(vision_desc: str) -> str:
     """使用 AI 总结长篇愿景画布"""
     # 如果描述比较短，或者已经是总结过的，直接返回
@@ -224,7 +226,8 @@ async def _summarize_vision(vision_desc: str) -> str:
     if "##" not in vision_desc and len(vision_desc) < 300:
         return vision_desc
 
-    logger.info("正在生成愿景总结...")
+    logger.info(f"正在生成愿景总结... (Proxy: {os.environ.get('HTTPS_PROXY', 'None')})")
+    
     prompt = f"""
     作为用户的“数字分身”，请将以下长篇幅的“终局愿景画布”总结为一段简洁、有力、且富有启发性的愿景描述（约 150 字以内）。
     
@@ -239,27 +242,27 @@ async def _summarize_vision(vision_desc: str) -> str:
     总结后的愿景：
     """
     
-    try:
-        # 增加超时控制
-        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7, timeout=10)
-        response = await asyncio.wait_for(llm.ainvoke([HumanMessage(content=prompt)]), timeout=12)
-        return response.content.strip()
-    except asyncio.TimeoutError:
-        logger.warning("AI 总结愿景超时，使用截断文本")
-        return vision_desc[:150] + "..." if len(vision_desc) > 150 else vision_desc
-    except Exception as e:
-        logger.error(f"AI 总结愿景失败: {e}")
-        # 如果失败，返回前 150 个字符
-        return vision_desc[:150] + "..." if len(vision_desc) > 150 else vision_desc
+    # 使用统一的 NeuralProcessor (已配置代理)
+    return await get_processor().summarize_text(vision_desc, prompt)
 
 
 # ============ API 端点 ============
+
+import os
 
 @router.get("/overview", response_model=DashboardOverview)
 async def get_dashboard_overview(user: User = Depends(require_user)):
     """
     获取仪表盘总览数据
     """
+    # 确保环境变量中存在代理设置 (LangChain Google GenAI 依赖环境变量)
+    if not os.environ.get("HTTPS_PROXY") and not os.environ.get("HTTP_PROXY"):
+        # 尝试使用默认代理 fallback
+        default_proxy = "http://127.0.0.1:1082"
+        os.environ["HTTPS_PROXY"] = default_proxy
+        os.environ["HTTP_PROXY"] = default_proxy
+        logger.info(f"Dashboard: Applied fallback proxy {default_proxy}")
+
     stats = _get_user_stats(user.id)
     
     # 1. 生成 AI 总结

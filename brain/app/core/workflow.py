@@ -21,6 +21,7 @@ env_path = Path(__file__).parent.parent.parent / ".env"
 load_dotenv(env_path)
 
 from app.services.memory.memory_service import MemoryService
+from app.services.evolution import get_evolution_service
 from app.core.config import SYSTEM_PROMPT_TEMPLATE, ENDGAME_VISION
 from app.models.user import PersonaConfig, UserVision
 
@@ -285,10 +286,10 @@ def _generate_dynamic_system_prompt(state: AgentState) -> str:
     base_prompt += f"""
 
 ## 当前状态 (H3)
-- Mind: {h3.get('mind', 5)}/10
-- Body: {h3.get('body', 5)}/10
-- Spirit: {h3.get('spirit', 5)}/10
-- Vocation: {h3.get('vocation', 5)}/10
+- 心智 (Mind): {h3.get('mind', 50)}%
+- 身体 (Body): {h3.get('body', 50)}%
+- 精神 (Spirit): {h3.get('spirit', 50)}%
+- 志业 (Vocation): {h3.get('vocation', 50)}%
 
 请基于以上设定，以 {persona_name} 的身份与用户对话。"""
     
@@ -309,6 +310,22 @@ def architect_node(state: AgentState) -> AgentState:
 2. **行动导向**：不仅要列出进度，还要根据上下文建议“下一步该做什么”。
 3. **温暖的理性**：在引用对齐分析时，要把分析结果转化为对用户的理解。例如，如果对齐分低，你可以说：“虽然这些琐事目前占据了你的精力，但我理解它们是必经之路。我们可以尝试快速搞定它们，为你真正的核心项目『认知重构』腾出空间。”
 """
+
+    # 获取进化指导 (Self-Navigating)
+    try:
+        evolution_service = get_evolution_service()
+        last_message = state["messages"][-1].content
+        guidance = evolution_service.get_guidance(last_message)
+        
+        if guidance:
+            system_prompt += f"""
+### 💡 历史经验指导 (Evolutionary Guidance)
+根据过往的交互反思，针对当前情况，请参考以下策略：
+{guidance}
+"""
+            logger.info(f"已注入进化指导: {guidance[:50]}...")
+    except Exception as e:
+        logger.error(f"获取进化指导失败: {e}")
 
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.0-flash",

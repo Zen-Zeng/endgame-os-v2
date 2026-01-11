@@ -9,6 +9,7 @@ import uuid
 import asyncio
 import logging
 
+import json
 from ..models.memory import (
     MemoryNode, MemoryRelation, MemoryType, RelationType,
     MemorySearchResult, MemoryGraphData, MemoryCreateRequest, MemorySearchRequest
@@ -17,6 +18,7 @@ from ..models.user import User
 from .auth import require_user
 
 from ..services.memory.memory_service import get_memory_service
+from ..services.memory.consolidator import MemoryConsolidator
 from ..core.config import UPLOAD_DIR
 
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +33,33 @@ _tasks_db: Dict[str, Dict] = {}  # task_id -> task_status
 training_executor = ThreadPoolExecutor(max_workers=1)
 
 logger = logging.getLogger(__name__)
+
+async def _process_consolidation_task(task_id: str, user_id: str):
+    """异步处理语义合并任务"""
+    try:
+        _tasks_db[task_id]["status"] = "processing"
+        _tasks_db[task_id]["progress"] = 0
+        _tasks_db[task_id]["message"] = "开始分析记忆图谱..."
+
+        def on_progress(p, msg):
+            loop = asyncio.get_event_loop()
+            loop.call_soon_threadsafe(
+                lambda: _tasks_db[task_id].update({"progress": p, "message": msg})
+            )
+
+        consolidator = MemoryConsolidator()
+        result = await consolidator.consolidate_memory(user_id, on_progress)
+        
+        _tasks_db[task_id]["status"] = "completed"
+        _tasks_db[task_id]["progress"] = 100
+        _tasks_db[task_id]["message"] = result.get("message", "合并完成")
+        _tasks_db[task_id]["result"] = result
+        
+    except Exception as e:
+        logger.error(f"Consolidation task {task_id} failed: {str(e)}")
+        _tasks_db[task_id]["status"] = "failed"
+        _tasks_db[task_id]["error"] = str(e)
+        _tasks_db[task_id]["message"] = f"合并失败: {str(e)}"
 
 async def _process_training_task(task_id: str, filename: str, user_id: str):
     """异步处理训练任务，调用真实的 MemoryService"""
@@ -350,6 +379,89 @@ async def get_memory_stats(user: User = Depends(require_user)):
     except Exception as e:
         logger.error(f"获取统计数据失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/pending", response_model=List[MemoryNode])
+async def get_pending_memories(user: User = Depends(require_user)):
+    """
+    [Strategic Brain] 获取待确认的记忆节点
+    """
+    service = get_memory_service()
+    try:
+        # 查询 status='pending' 的节点
+        with service.graph_store._get_conn() as conn:
+            # 兼容性处理：如果表没有 status 列，这里会报错，需要 try-catch
+            try:
+                rows = conn.execute(
+                    "SELECT id, type, name, content, attributes FROM nodes WHERE user_id=? AND status='pending'",
+                    (user.id,)
+                ).fetchall()
+            except Exception:
+                # 可能是旧表结构
+                return []
+            
+            result = []
+            for r in rows:
+                result.append(MemoryNode(
+                    id=r['id'],
+                    type=r['type'],
+                    label=r['name'] or "Unknown",
+                    content=r['content'],
+                    metadata=json.loads(r['attributes']) if r['attributes'] else {},
+                    status="pending"
+                ))
+            return result
+    except Exception as e:
+        logger.error(f"Get pending memories failed: {e}")
+        return []
+
+@router.post("/confirm/{node_id}")
+async def confirm_memory(node_id: str, action: str = Query(..., regex="^(confirm|reject)$"), user: User = Depends(require_user)):
+    """
+    [Strategic Brain] 确认或拒绝记忆节点
+    action=confirm: 状态改为 confirmed
+    action=reject: 删除节点
+    """
+    service = get_memory_service()
+    try:
+        with service.graph_store._lock, service.graph_store._get_conn() as conn:
+            if action == "confirm":
+                conn.execute(
+                    "UPDATE nodes SET status='confirmed' WHERE id=? AND user_id=?",
+                    (node_id, user.id)
+                )
+                message = "记忆已确认"
+            else:
+                # 级联删除相关边
+                conn.execute("DELETE FROM edges WHERE (source=? OR target=?) AND user_id=?", (node_id, node_id, user.id))
+                conn.execute("DELETE FROM nodes WHERE id=? AND user_id=?", (node_id, user.id))
+                message = "记忆已拒绝并删除"
+                
+            return {"success": True, "message": message}
+    except Exception as e:
+        logger.error(f"Confirm memory failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/consolidate")
+async def start_consolidation(
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_user)
+):
+    """
+    [Strategic Brain] 触发记忆语义合并
+    对相似的 Concept/Task 节点进行智能归并
+    """
+    task_id = f"con_{str(uuid.uuid4())[:8]}"
+    _tasks_db[task_id] = {
+        "id": task_id,
+        "type": "consolidation",
+        "status": "pending",
+        "progress": 0,
+        "message": "任务已创建",
+        "created_at": datetime.now().isoformat()
+    }
+    
+    background_tasks.add_task(_process_consolidation_task, task_id, user.id)
+    return {"task_id": task_id, "message": "语义合并任务已启动"}
 
 @router.delete("/clear")
 async def clear_memory(user: User = Depends(require_user)):

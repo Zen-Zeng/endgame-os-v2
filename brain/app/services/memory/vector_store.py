@@ -33,6 +33,11 @@ class VectorStore:
                 metadata={"hnsw:space": "cosine"},
                 embedding_function=None
             )
+            self.experience_collection = self.client.get_or_create_collection(
+                name="endgame_experiences",
+                metadata={"hnsw:space": "cosine"},
+                embedding_function=None
+            )
             
             # 自动维度检测与重置
             self._check_and_reset_if_needed()
@@ -126,3 +131,21 @@ class VectorStore:
     
     def get_stats(self):
         return {"count": self.collection.count()}
+
+    def add_experience_vector(self, exp_id: str, text: str, vector: List[float]):
+        """将经验存入向量库，以便检索"""
+        try:
+            self.experience_collection.add(
+                ids=[exp_id],
+                embeddings=[vector],
+                documents=[text]
+            )
+        except Exception as e:
+            logger.error(f"经验向量化失败: {e}")
+
+    def search_experiences(self, query_vector: List[float], n_results: int = 3) -> List[str]:
+        """检索相关的历史经验"""
+        try:
+            results = self.experience_collection.query(query_embeddings=[query_vector], n_results=n_results)
+            return results['documents'][0] if results['documents'] else []
+        except Exception: return []

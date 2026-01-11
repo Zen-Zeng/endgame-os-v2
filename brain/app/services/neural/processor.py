@@ -5,8 +5,9 @@
 import logging
 import json
 import asyncio
+import os
 from typing import List, Dict, Any, Tuple, Optional
-import google.generativeai as genai
+from google import genai
 from app.core.config import MODEL_CONFIG
 
 logging.basicConfig(level=logging.INFO)
@@ -23,14 +24,24 @@ class NeuralProcessor:
         self.embedding_model = None
         self.embedding_model_name = MODEL_CONFIG["embedding_model"]
         
-        # 初始化 Gemini
+        # 初始化 Gemini (使用新版 SDK)
         self.api_key = MODEL_CONFIG.get("gemini_api_key")
         if self.api_key:
-            genai.configure(api_key=self.api_key)
-            self.gemini = genai.GenerativeModel(MODEL_CONFIG["gemini_model"])
-            logger.info(f"Gemini 处理器就绪: {MODEL_CONFIG['gemini_model']}")
+            # [Fix] 强制使用用户指定的代理 127.0.0.1:1082
+            # 之前的逻辑可能被系统环境变量污染 (如 33210 端口)
+            proxy_url = "http://127.0.0.1:1082"
+            
+            logger.info(f"Enforcing proxy settings to: {proxy_url}")
+            os.environ["http_proxy"] = proxy_url
+            os.environ["https_proxy"] = proxy_url
+            os.environ["HTTP_PROXY"] = proxy_url
+            os.environ["HTTPS_PROXY"] = proxy_url
+            
+            self.client = genai.Client(api_key=self.api_key)
+            self.model_name = MODEL_CONFIG["gemini_model"]
+            logger.info(f"Gemini 处理器就绪: {self.model_name} (Proxy: {proxy_url})")
         else:
-            self.gemini = None
+            self.client = None
             logger.warning("未配置 Gemini API Key，图谱提取功能将不可用")
 
     def _ensure_embedding_loaded(self):
@@ -44,6 +55,68 @@ class NeuralProcessor:
             self.embedding_model = SentenceTransformer(self.embedding_model_name)
         except Exception as e:
             logger.error(f"向量模型加载失败: {e}")
+
+    async def arbitrate_merge(self, names: List[str]) -> Dict[str, Any]:
+        """
+        [Memory Consolidator]
+        仲裁一组名称是否指向同一个实体，并生成标准名称。
+        """
+        if not self.client:
+            return {"should_merge": False}
+        
+        prompt = f"""
+        你是一个知识图谱管理员。以下是一组看起来相似的概念名称：
+        {json.dumps(names, ensure_ascii=False)}
+
+        请判断它们是否应该合并为同一个实体？
+        规则：
+        1. 仅当它们是同义词、缩写、单复数、或大小写变体时合并 (如 "RustLang" 和 "Rust", "AI" 和 "Artificial Intelligence")。
+        2. 如果它们是明显不同的东西 (如 "Java" 和 "JavaScript")，请不要合并。
+        3. 如果合并，请提供一个最标准、最通用的名称作为 'master_name'。
+
+        返回 JSON:
+        {{
+            "should_merge": true/false,
+            "master_name": "Standard Name" (仅当 should_merge 为 true 时必填),
+            "reason": "简短理由"
+        }}
+        """
+
+        try:
+            def _sync_generate():
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config={"response_mime_type": "application/json"}
+                )
+            
+            response = await asyncio.to_thread(_sync_generate)
+            return json.loads(response.text)
+        except Exception as e:
+            logger.error(f"Merge arbitration failed for {names}: {str(e)}")
+            return {"should_merge": False, "reason": f"System error: {str(e)}"}
+
+    async def summarize_text(self, text: str, prompt_template: str = None) -> str:
+        """
+        [通用能力] 使用 Gemini 总结文本
+        """
+        if not self.client:
+            return text[:150] + "..." if len(text) > 150 else text
+
+        prompt = prompt_template if prompt_template else f"请总结以下内容：\n{text}"
+
+        try:
+            def _sync_generate():
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                )
+            
+            response = await asyncio.to_thread(_sync_generate)
+            return response.text.strip()
+        except Exception as e:
+            logger.error(f"Summarize text failed: {e}")
+            return text[:150] + "..." if len(text) > 150 else text
 
     # --- 核心接口 1: 向量化 (右脑) ---
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
@@ -64,51 +137,54 @@ class NeuralProcessor:
             return [[0.0] * 1024 for _ in texts]
 
     # --- 核心接口 2: 结构化关系提取 (左脑) ---
-    async def extract_structured_memory(self, text: str) -> Dict[str, Any]:
+    async def extract_structured_memory(self, text: str, user_id: str = "default_user", chapter_start_date: str = None) -> Dict[str, Any]:
         """
-        使用 Gemini 2.0 Flash 提取结构化记忆（实体 + 关系）
+        [Strategic Brain Upgrade]
+        使用 Gemini 2.0 Flash 提取结构化记忆，注入主体意识和五层战略结构。
         """
-        if not self.gemini:
+        if not self.client:
             return {"entities": [], "relations": []}
 
         prompt = f"""
-        你是一个专业的【个人终局操作系统 (Endgame OS)】知识提取引擎。
-        你的任务是从用户的原始文本（如对话记录、笔记、文档）中提取深度的、结构化的【记忆实体】和【关系】。
+        你是一个【Endgame OS 战略大脑】的感知中枢。
+        你的核心任务是：从文本中提取知识，并将其归位到以【Self ({user_id})】为中心的五层战略图谱中。
 
-        ### 提取规则：
-        1. **识别实体 (Entities)**：
-           - **Person**: 用户提到的重要人物，提取其背景、偏好、与用户的关系。
-           - **Project**: 正在进行的具体项目、研究、创作或开发任务。
-           - **Concept**: 核心知识点、方法论、独特观点或专业术语。
-           - **Event**: 重要的时间点、里程碑、会议或生活经历。
-           - **Experience**: 用户的感悟、情绪偏好、底层信念或性格特征。
-           - **Tool**: 经常使用的软件、硬件、AI模型或物理工具。
+        ### 1. 核心原则：主体性 (Subjectivity)
+        - **绝对主体**：文本中的“我”、“我们”、“本人”等第一人称表述，**必须**直接归属到 ID 为 `{user_id}` 的 Self 节点，**严禁**创建名为 "User" 或 "Me" 的新节点。
+        - **外部识别**：只有当提到具体的第三方姓名（如“王总”、“Alice”）时，才创建 `Person` 节点。
 
-        2. **构建档案 (Dossier)**：针对不同类型，提取以下维度的深度信息（JSON 格式）：
-           - **Person**: {{"bio": "身份背景", "preferences": ["喜好1"], "interaction_history": "互动关键点"}}
-           - **Project**: {{"status": "状态/进度", "tech_stack": ["技术栈"], "milestones": ["里程碑"], "architecture": "核心设计"}}
-           - **Concept**: {{"definition": "核心定义", "principles": ["原则/定律"], "links": ["相关领域"]}}
-           - **Experience**: {{"emotion": "情感基调", "insight": "核心感悟", "impact": "对未来的影响"}}
-           - **Default**: {{"summary": "简要概述", "metadata": {{"key": "value"}}}}
+        ### 2. 节点分类体系 (Node Ontology)
+        请严格将提取的信息分类为以下 6 种类型：
+        - **Vision**: 5年终局愿景（通常涉及人生方向、最终状态）。
+        - **Goal**: 战略目标（OKR中的O，通常有明确的时间边界）。
+        - **Project**: 执行项目（为了实现目标而做的一系列事情）。
+        - **Task**: 原子任务（具体的行动项，TODO）。
+        - **Person**: 外部联系人（协作者、朋友、客户）。
+        - **Concept**: 认知/信念（方法论、知识点、价值观）。
 
-        3. **提取关系 (Relations)**：
-           - 捕捉实体间的逻辑关联（例如：Person -> WORKS_ON -> Project, Concept -> UNDERLIES -> Project）。
-           - 关系应简洁明确（如：BELONGS_TO, PARTICIPATED_IN, DEFINES, LIKES）。
+        ### 3. 关系提取规则 (Predicates)
+        - Self -> **OWNS** -> Vision
+        - Vision -> **DECOMPOSES_TO** -> Goal
+        - Goal -> **ACHIEVED_BY** -> Project
+        - Project -> **CONSISTS_OF** -> Task
+        - Self -> **EXECUTES** -> Task/Project
+        - Self -> **KNOWS** -> Person
+        - Person -> **SUPPORTS** -> Project
+        - Self -> **BELIEVES** -> Concept
 
-        ### 输出要求：
-        必须返回纯 JSON 格式，严禁包含任何 Markdown 代码块标签或解释性文字。
-        格式如下：
+        ### 4. 输出要求 (JSON)
         {{
           "entities": [
             {{
-              "name": "唯一名称",
-              "type": "Person|Project|Concept|Event|Experience|Tool",
-              "content": "核心描述文字",
-              "dossier": {{ ...根据类型填充对应的结构化字段... }}
+              "name": "实体名称 (Self节点请直接填 '{user_id}')",
+              "type": "Vision|Goal|Project|Task|Person|Concept",
+              "content": "核心描述",
+              "status": "pending",  // 默认为待确认
+              "dossier": {{ ...详细属性... }}
             }}
           ],
           "relations": [
-            {{"source": "主体名", "relation": "关系名", "target": "客体名"}}
+            {{"source": "主体ID", "relation": "谓语", "target": "客体ID"}}
           ]
         }}
 
@@ -118,9 +194,10 @@ class NeuralProcessor:
 
         try:
             def _sync_generate():
-                return self.gemini.generate_content(
-                    prompt,
-                    generation_config={
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config={
                         "response_mime_type": "application/json"
                     }
                 )
@@ -131,8 +208,15 @@ class NeuralProcessor:
                 return {"entities": [], "relations": []}
             
             data = json.loads(response.text)
+            
+            # 后处理：确保 Self 节点不被重复创建为普通节点
+            entities = data.get("entities", [])
+            for e in entities:
+                if e["name"] == user_id:
+                    e["type"] = "Self" # 强制修正类型
+                    
             return {
-                "entities": data.get("entities", []),
+                "entities": entities,
                 "relations": data.get("relations", [])
             }
         except Exception as e:

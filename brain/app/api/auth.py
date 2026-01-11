@@ -11,6 +11,7 @@ import uuid
 
 from ..models.user import User, UserCreate, UserUpdate, UserVision, PersonaConfig
 from ..services.user.user_service import user_service
+from ..services.memory.memory_service import get_memory_service
 from ..core.config import DATA_DIR
 
 router = APIRouter()
@@ -182,6 +183,14 @@ async def login(request: LoginRequest):
     _sessions[token] = target_user.id
     _save_sessions(_sessions)
     
+    # [Strategic Brain] 同步 User 到 Self 节点
+    try:
+        memory_service = get_memory_service()
+        vision_data = target_user.vision.model_dump() if target_user.vision else None
+        memory_service.graph_store.sync_user_to_self_node(target_user.id, vision_data)
+    except Exception as e:
+        print(f"Sync Self Node Error during login: {e}")
+
     return AuthResponse(access_token=token, user=target_user)
 
 
@@ -234,6 +243,15 @@ async def update_me(
     _users_db[user.id] = user_data
     user_service.update_user(user.id, user_data)
     
+    # [Strategic Brain] 同步 User 到 Self 节点 (当愿景更新时)
+    if "vision" in update_dict:
+        try:
+            memory_service = get_memory_service()
+            vision_data = user_data.get("vision")
+            memory_service.graph_store.sync_user_to_self_node(user.id, vision_data)
+        except Exception as e:
+            print(f"Sync Self Node Error during update: {e}")
+
     return User(**user_data)
 
 

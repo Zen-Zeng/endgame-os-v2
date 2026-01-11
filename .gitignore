@@ -50,5 +50,11 @@ transformers_cache/
 .env.local
 .env.*.local
 
+# Vercel
+.vercel/
+
+# NPM Cache
+face/.npm-cache/
+
 # Trae配置
 .trae/

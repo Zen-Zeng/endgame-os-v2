@@ -23,6 +23,8 @@ from .auth import require_user, get_current_user
 from ..core.config import SYSTEM_PROMPT_TEMPLATE, ENDGAME_VISION
 from ..core.workflow import create_endgame_graph
 from ..services.memory.memory_service import get_memory_service
+from ..services.evolution import get_evolution_service
+from ..core.db import db_manager
 
 router = APIRouter()
 
@@ -174,11 +176,23 @@ async def _generate_ai_response(
         current_time_str = f"[{datetime.now().strftime('%H:%M')}] "
         history.append(HumanMessage(content=f"{current_time_str}{last_user_message}"))
         
+        # 获取最新的 H3 能量状态
+        h3_history = db_manager.get_h3_energy_history(user.id, 1)
+        h3_state = {"mind": 50, "body": 50, "spirit": 50, "vocation": 50} # 默认 50%
+        if h3_history:
+            h3_data = h3_history[0]
+            h3_state = {
+                "mind": h3_data.get("mind", 50),
+                "body": h3_data.get("body", 50),
+                "spirit": h3_data.get("spirit", 50),
+                "vocation": h3_data.get("vocation", 50)
+            }
+        
         # 准备初始状态
         initial_state = {
             "user_id": user.id,
             "messages": history, # 已经包含了最后一条
-            "h3_state": user.h3_state.model_dump() if hasattr(user, 'h3_state') else {"mind": 5, "body": 5, "spirit": 5, "vocation": 5},
+            "h3_state": h3_state,
             "persona": user.persona,
             "vision": user.vision,
             "context": "",
@@ -230,6 +244,16 @@ async def _generate_ai_response(
                     conversation_id=conversation_id,
                     user_message=last_user_message,
                     ai_response=full_ai_content
+                )
+            )
+
+            # 异步触发进化分析 (Self-Attributing)
+            evolution_service = get_evolution_service()
+            asyncio.create_task(
+                evolution_service.evolve(
+                    user_id=user.id,
+                    user_query=last_user_message,
+                    current_response=full_ai_content
                 )
             )
 
