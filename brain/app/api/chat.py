@@ -234,6 +234,18 @@ async def _generate_ai_response(
                     alignment = event["check_alignment"]
                     score = alignment.get("alignment_score", 0.5)
                     logger.info(f"对齐检查分数: {score}")
+                
+                # 监听 inject_strategy 事件 (Phase 1)
+                elif "inject_strategy" in event:
+                    strategy_data = event["inject_strategy"]
+                    context = strategy_data.get("strategy_context", "")
+                    if context:
+                        # 提取具体的策略文本 (去掉前缀)
+                        strategies = [line.strip("- ").strip() for line in context.split("\n") if line.strip().startswith("-")]
+                        if strategies:
+                            logger.info(f"推送到前端的策略: {strategies}")
+                            yield f"data: {json.dumps({'type': 'meta', 'metadata': {'strategies': strategies}})}\n\n"
+
         except Exception as graph_err:
             logger.error(f"图执行内部错误: {graph_err}", exc_info=True)
             yield f"\n[思考中断: {str(graph_err)}]"

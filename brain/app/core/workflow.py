@@ -38,6 +38,7 @@ class AgentState(TypedDict):
     user_id: str
     messages: Annotated[Sequence[BaseMessage], operator.add]
     context: str
+    strategy_context: str # 新增：策略上下文
     current_date: str  # 新增：当前系统时间
     h3_state: Dict[str, int]
     alignment_score: float
@@ -140,8 +141,36 @@ def retrieve_memory_node(state: AgentState, memory_service: MemoryService) -> Ag
     
     return {
         "context": context,
-        "next_step": "check_alignment"
+        "next_step": "inject_strategy" # 修改下一步为 inject_strategy
     }
+
+def inject_strategy_node(state: AgentState, memory_service: MemoryService) -> AgentState:
+    """
+    策略注入节点 (Phase 1)
+    检索历史策略并注入上下文
+    """
+    last_message = state["messages"][-1].content
+    logger.info(f"正在进行策略检索: {last_message[:20]}...")
+    
+    try:
+        query_vector = memory_service.neural_processor.embed_batch([last_message])[0]
+        strategies = memory_service.vector_store.search_experiences(query_vector, n_results=3)
+        
+        strategy_context = ""
+        if strategies:
+            strategy_context = "\n[历史策略经验参考]：\n" + "\n".join([f"- {s}" for s in strategies])
+            logger.info(f"检索到 {len(strategies)} 条相关策略")
+            
+        return {
+            "strategy_context": strategy_context,
+            "next_step": "check_alignment"
+        }
+    except Exception as e:
+        logger.error(f"策略检索失败: {e}")
+        return {
+            "strategy_context": "",
+            "next_step": "check_alignment"
+        }
 
 def check_alignment_node(state: AgentState) -> AgentState:
     """
@@ -212,6 +241,7 @@ def _generate_dynamic_system_prompt(state: AgentState) -> str:
     vision = state.get("vision")
     h3 = state.get("h3_state", {"mind": 5, "body": 5, "spirit": 5, "vocation": 5})
     current_date = state.get("current_date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    strategy_context = state.get("strategy_context", "")
     
     # 防御性获取属性 (兼容 dict 和 object)
     def get_attr(obj, attr, default=""):
@@ -264,6 +294,11 @@ def _generate_dynamic_system_prompt(state: AgentState) -> str:
         vocation=h3.get('vocation', 50)
     )
     
+    # 注入策略上下文
+    if strategy_context:
+        base_prompt += f"\n{strategy_context}\n"
+        base_prompt += "请参考以上历史策略经验，避免重复过去的错误，并应用已验证的成功策略。"
+
     return base_prompt
 
 def architect_node(state: AgentState) -> AgentState:
@@ -277,17 +312,15 @@ def architect_node(state: AgentState) -> AgentState:
     # 增加对事实回答的强制要求
     system_prompt += ANSWER_PRINCIPLES_PROMPT
 
-    # 获取进化指导 (Self-Navigating)
-    try:
-        evolution_service = get_evolution_service()
-        last_message = state["messages"][-1].content
-        guidance = evolution_service.get_guidance(last_message)
-        
-        if guidance:
-            system_prompt += EVOLUTION_GUIDANCE_PROMPT.format(guidance=guidance)
-            logger.info(f"已注入进化指导: {guidance[:50]}...")
-    except Exception as e:
-        logger.error(f"获取进化指导失败: {e}", exc_info=True)
+    # 获取进化指导 (Self-Navigating) - 注意：这里与 inject_strategy 功能有重叠，
+    # inject_strategy 是 LangGraph 节点，这里是原来的 hack 实现。
+    # 为了保持架构清晰，我们优先使用 inject_strategy 节点注入的内容。
+    # 如果 inject_strategy 已经注入了，这里可以不再重复调用 get_guidance，
+    # 或者将这里的逻辑迁移到 inject_strategy 节点。
+    # 既然我们已经实现了 inject_strategy 节点，这里的逻辑可以简化或移除。
+    # 但为了兼容旧代码可能存在的直接调用，暂时保留异常处理，但不再重复注入，因为 _generate_dynamic_system_prompt 已经包含了 strategy_context
+    
+    # ... 原有的 evolution_service.get_guidance 调用移除，避免重复 ...
 
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.0-flash",
@@ -313,13 +346,16 @@ def create_endgame_graph(memory_service: MemoryService):
 
     # 使用 partial 绑定依赖
     bound_retrieve_memory = partial(retrieve_memory_node, memory_service=memory_service)
+    bound_inject_strategy = partial(inject_strategy_node, memory_service=memory_service)
 
     workflow.add_node("retrieve_memory", bound_retrieve_memory)
+    workflow.add_node("inject_strategy", bound_inject_strategy) # 新增节点
     workflow.add_node("check_alignment", check_alignment_node)
     workflow.add_node("architect", architect_node)
 
     workflow.add_edge(START, "retrieve_memory")
-    workflow.add_edge("retrieve_memory", "check_alignment")
+    workflow.add_edge("retrieve_memory", "inject_strategy") # 插入中间步骤
+    workflow.add_edge("inject_strategy", "check_alignment")
     workflow.add_edge("check_alignment", "architect")
     workflow.add_edge("architect", END)
 

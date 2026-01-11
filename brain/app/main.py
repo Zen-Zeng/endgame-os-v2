@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from langchain_core.messages import HumanMessage
 from app.services.memory.memory_service import MemoryService
+from app.services.evolution import get_evolution_service # 引入进化服务
 from app.core.config import UVICORN_CONFIG, UPLOAD_DIR
 from app.api import api_router
 import logging
@@ -16,10 +17,13 @@ import uvicorn
 import argparse
 import shutil
 import uuid
+import asyncio
 from datetime import datetime
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from contextlib import asynccontextmanager
+from apscheduler.schedulers.asyncio import AsyncIOScheduler # 引入调度器
 
 # 初始化线程池用于 CPU 密集型任务
 executor = ThreadPoolExecutor(max_workers=1)
@@ -41,39 +45,42 @@ class TaskInfo(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
-def run_ingestion_task(task_id: str, file_paths: List[str]):
-    """
-    后台执行记忆摄取任务的包装函数
-    """
-    try:
-        tasks_db[task_id].status = TaskStatus.IN_PROGRESS
-        tasks_db[task_id].updated_at = datetime.now()
-        tasks_db[task_id].message = f"正在摄取 {len(file_paths)} 个文件..."
-        
-        # 实际调用同步的记忆摄取方法
-        for file_path in file_paths:
-            memory_service.ingest_file(file_path)
-        
-        tasks_db[task_id].status = TaskStatus.COMPLETED
-        tasks_db[task_id].progress = 100
-        tasks_db[task_id].message = "记忆训练完成"
-        tasks_db[task_id].updated_at = datetime.now()
-        
-    except Exception as e:
-        logger.error(f"任务 {task_id} 失败: {str(e)}")
-        tasks_db[task_id].status = TaskStatus.FAILED
-        tasks_db[task_id].message = f"错误: {str(e)}"
-        tasks_db[task_id].updated_at = datetime.now()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- 定时任务配置 ---
+scheduler = AsyncIOScheduler()
+
+async def nightly_evolution_job():
+    """夜间进化任务"""
+    logger.info("⏰ 触发定时任务: Nightly Evolution Cycle")
+    evolution_service = get_evolution_service()
+    await evolution_service.run_nightly_cycle()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时
+    logger.info("🚀 系统启动中...")
+    
+    # 启动定时任务调度器
+    # 设定每日凌晨 04:00 执行
+    scheduler.add_job(nightly_evolution_job, 'cron', hour=4, minute=0)
+    scheduler.start()
+    logger.info("📅 定时任务调度器已启动 (Next run at 04:00)")
+    
+    yield
+    
+    # 关闭时
+    logger.info("🛑 系统关闭中...")
+    scheduler.shutdown()
 
 app = FastAPI(
     title="Endgame OS Brain API",
     description="基于 LangGraph 和 LangChain 的智能大脑服务",
     version="2.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan # 注册生命周期
 )
 
 app.add_middleware(
@@ -103,7 +110,8 @@ else:
             "frontend": "Not mounted (run 'npm run build' in face directory)"
         }
 
-memory_service = MemoryService()
+# 移除全局 MemoryService，使用 Depends 注入
+# memory_service = MemoryService() 
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 @app.get("/api/health")
@@ -112,12 +120,6 @@ async def health_check():
     健康检查接口
     """
     return {"status": "healthy"}
-
-
-
-
-
-
 
 def main():
     """

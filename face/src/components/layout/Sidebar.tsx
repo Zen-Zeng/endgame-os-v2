@@ -25,9 +25,40 @@ import {
 } from 'lucide-react';
 import { useAuthStore } from '../../stores/useAuthStore';
 import { useUIStore } from '../../stores/useUIStore';
+import { useH3Store } from '../../stores/useH3Store';
 import { api } from '../../lib/api';
 import Button from '../ui/Button';
 import clsx from 'clsx';
+
+function H3EnergyDisplay() {
+  const { scores } = useH3Store();
+  
+  const items = [
+    { label: 'Mind', value: scores.mind, color: 'bg-blue-500' },
+    { label: 'Body', value: scores.body, color: 'bg-green-500' },
+    { label: 'Spirit', value: scores.spirit, color: 'bg-purple-500' },
+    { label: 'Vocation', value: scores.vocation, color: 'bg-amber-500' },
+  ];
+
+  return (
+    <div className="space-y-3">
+      {items.map((item) => (
+        <div key={item.label} className="space-y-1">
+          <div className="flex justify-between text-[10px] font-medium text-[var(--md-sys-color-on-surface-variant)]">
+            <span>{item.label}</span>
+            <span>{item.value}%</span>
+          </div>
+          <div className="h-1.5 w-full bg-[var(--md-sys-color-surface-container-highest)] rounded-full overflow-hidden">
+            <div 
+              className={clsx("h-full rounded-full transition-all duration-500", item.color)} 
+              style={{ width: `${item.value}%` }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 // 设置弹窗组件
 interface SettingsModalProps {
@@ -467,6 +498,16 @@ export default function Sidebar() {
             </div>
           ))}
         </nav>
+
+        {/* H3 Energy Status */}
+        {!sidebarCollapsed && (
+          <div className="px-6 py-4 mb-2">
+            <p className="text-[10px] font-bold text-[var(--md-sys-color-on-surface-variant)] opacity-50 uppercase tracking-widest mb-3">
+              Energy State
+            </p>
+            <H3EnergyDisplay />
+          </div>
+        )}
 
         {/* 3. FOOTER */}
         <div className="p-4 space-y-2">

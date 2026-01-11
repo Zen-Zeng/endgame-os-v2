@@ -4,7 +4,7 @@
  */
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Loader2, RefreshCw, Database, Trash2, FileText, Plus, Mic, Bot } from 'lucide-react';
+import { Send, Loader2, RefreshCw, Database, Trash2, FileText, Plus, Mic, Bot, Sparkles } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useChatStore } from '../stores/useChatStore';
 import { useH3Store } from '../stores/useH3Store';
@@ -89,9 +89,11 @@ export default function ChatInterface() {
           },
           stream: true
         },
-        (chunk) => {
+        (chunk: any) => {
           if (chunk.type === 'content' && chunk.content) {
             updateLastMessage(chunk.content);
+          } else if (chunk.type === 'meta' && chunk.metadata) {
+            updateLastMessage(null, chunk.metadata);
           } else if (chunk.type === 'error') {
             setError(chunk.content || '生成出错');
           }
@@ -279,6 +281,16 @@ export default function ChatInterface() {
                         ? "bg-primary-600/20 border border-primary-500/30 text-white/90 rounded-tr-none" 
                         : "bg-white/5 border border-white/10 text-white/80 rounded-tl-none"
                     )}>
+                      {msg.role === 'assistant' && msg.metadata?.strategies && (
+                        <div className="mb-3 flex flex-wrap gap-2">
+                          {(msg.metadata.strategies as string[]).map((strategy, i) => (
+                            <span key={i} className="px-2 py-0.5 rounded-full bg-primary-500/20 text-primary-300 text-[10px] border border-primary-500/30 flex items-center gap-1 w-fit">
+                              <Sparkles className="w-3 h-3" />
+                              {strategy}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="prose prose-invert prose-sm max-w-none">
                         <ReactMarkdown>
                           {msg.content}

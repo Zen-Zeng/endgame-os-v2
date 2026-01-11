@@ -1,13 +1,13 @@
 """
 Evolution Service (进化服务)
 负责系统的自我反思 (Self-Questioning)、归因 (Self-Attributing) 和经验沉淀。
-实现 AgentEvolver 核心逻辑。
+实现 AgentEvolver 核心逻辑，包括夜间循环反思。
 """
 import uuid
 import logging
 import asyncio
-from typing import List, Optional
-from datetime import datetime
+from typing import List, Optional, Dict
+from datetime import datetime, timedelta
 from google import genai
 from google.genai import types
 
@@ -135,6 +135,121 @@ class EvolutionService:
             return guidance
         except Exception as e:
             logger.error(f"获取指导失败: {e}")
+            return ""
+
+    # --- Phase 3: 夜间进化闭环 ---
+    
+    async def run_nightly_cycle(self, user_id: str = "default_user"):
+        """
+        夜间循环 (The Nightly Cycle)
+        批量扫描昨日日志，进行系统性反思和策略生成
+        """
+        logger.info(f"开始执行夜间进化循环: {user_id}")
+        
+        # 1. 获取昨日日志
+        # 暂时没有直接的 get_logs_by_date 接口，我们需要通过 SQL 查询
+        # 假设我们通过 graph_store 的连接查询
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        logs = []
+        try:
+            with self.memory_service.graph_store._get_conn() as conn:
+                # 查询昨日的所有 Log 节点
+                # 注意：timestamp 存储格式可能不一致，这里做简单模糊匹配
+                cursor = conn.execute(
+                    "SELECT content FROM nodes WHERE type='Log' AND user_id=? AND attributes LIKE ?",
+                    (user_id, f'%{yesterday}%')
+                )
+                logs = [row['content'] for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"查询昨日日志失败: {e}")
+            return
+
+        if not logs:
+            logger.info("昨日无活动日志，跳过进化")
+            return
+            
+        logger.info(f"检索到 {len(logs)} 条昨日日志")
+        combined_logs = "\n".join(logs[:50]) # 限制长度，避免 Token 溢出
+
+        # 2. Reflector (反思者): 识别问题
+        reflections = await self._run_reflector(combined_logs)
+        if not reflections:
+            logger.info("Reflector 未发现显著问题")
+            return
+            
+        # 3. Strategist (策略家): 生成策略
+        for reflection in reflections:
+            strategy = await self._run_strategist(reflection['insight'])
+            if strategy:
+                self.create_experience(
+                    user_id, 
+                    reflection['trigger'], 
+                    reflection['insight'], 
+                    strategy
+                )
+        
+        logger.info("夜间进化循环完成")
+
+    async def _run_reflector(self, logs: str) -> List[Dict[str, str]]:
+        """Reflector: 分析日志，寻找改进点"""
+        prompt = f"""
+        作为用户的“数字分身”，请分析以下用户昨日的行为日志。
+        目标：识别用户是否偏离了“终局愿景”，或是否存在低效、情绪抵触等行为模式。
+        
+        昨日日志：
+        {logs}
+        
+        请输出 0-3 个关键洞察。格式如下：
+        TRIGGER: [行为/场景]
+        INSIGHT: [问题归因]
+        """
+        
+        try:
+            def _sync_generate():
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt
+                )
+            response = await asyncio.to_thread(_sync_generate)
+            content = response.text.strip()
+            
+            results = []
+            current = {}
+            for line in content.split('\n'):
+                if line.startswith("TRIGGER:"):
+                    if current: results.append(current)
+                    current = {"trigger": line.replace("TRIGGER:", "").strip()}
+                elif line.startswith("INSIGHT:"):
+                    if current: 
+                        current["insight"] = line.replace("INSIGHT:", "").strip()
+                        results.append(current)
+                        current = {}
+            return results
+        except Exception as e:
+            logger.error(f"Reflector 运行失败: {e}")
+            return []
+
+    async def _run_strategist(self, insight: str) -> str:
+        """Strategist: 基于洞察生成行动策略"""
+        prompt = f"""
+        针对以下用户行为洞察，生成一条具体的、可执行的改进策略。
+        要求：动作要在 2 分钟内完成，或者是思维上的微调。
+        
+        洞察：{insight}
+        
+        策略 (仅输出策略内容):
+        """
+        try:
+            def _sync_generate():
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt
+                )
+            response = await asyncio.to_thread(_sync_generate)
+            return response.text.strip()
+        except Exception as e:
+            logger.error(f"Strategist 运行失败: {e}")
             return ""
 
 # 单例

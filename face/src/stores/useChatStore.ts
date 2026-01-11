@@ -5,6 +5,7 @@ export interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  metadata?: Record<string, any>;
 }
 
 interface ChatState {
@@ -15,7 +16,7 @@ interface ChatState {
   setStreaming: (status: boolean) => void;
   setError: (error: string | null) => void;
   clearMessages: () => void;
-  updateLastMessage: (content: string) => void;
+  updateLastMessage: (content: string | null, metadata?: Record<string, any>) => void;
 }
 
 export const useChatStore = create<ChatState>()(
@@ -31,7 +32,7 @@ export const useChatStore = create<ChatState>()(
       setStreaming: (status) => set({ isStreaming: status }),
       setError: (error) => set({ error }),
       clearMessages: () => set({ messages: [] }),
-      updateLastMessage: (content) =>
+      updateLastMessage: (content, metadata) =>
         set((state) => {
           const newMessages = [...state.messages];
           if (newMessages.length > 0) {
@@ -39,7 +40,8 @@ export const useChatStore = create<ChatState>()(
             if (lastMessage.role === 'assistant') {
               newMessages[newMessages.length - 1] = {
                 ...lastMessage,
-                content: lastMessage.content + content,
+                content: content ? lastMessage.content + content : lastMessage.content,
+                metadata: metadata ? { ...lastMessage.metadata, ...metadata } : lastMessage.metadata,
               };
             }
           }

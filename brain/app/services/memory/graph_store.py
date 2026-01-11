@@ -44,13 +44,15 @@ class GraphStore:
                         attributes JSON,
                         status TEXT DEFAULT 'confirmed',
                         time_metadata JSON,
+                        strategic_role TEXT, -- Phase 2: 战略角色
+                        energy_impact INTEGER, -- Phase 2: 能量影响
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
                 
-                # [Strategic Brain] 自动迁移：检查并添加 status 和 time_metadata 列
+                # [Strategic Brain] 自动迁移：检查并添加 status, time_metadata, strategic_role, energy_impact 列
                 try:
-                    # 检查 status 列
+                    # 检查列是否存在
                     cursor = conn.execute("PRAGMA table_info(nodes)")
                     columns = [row['name'] for row in cursor.fetchall()]
                     
@@ -61,6 +63,14 @@ class GraphStore:
                     if 'time_metadata' not in columns:
                         logger.info("Migrating database: Adding 'time_metadata' column to nodes table...")
                         conn.execute("ALTER TABLE nodes ADD COLUMN time_metadata JSON")
+
+                    if 'strategic_role' not in columns:
+                        logger.info("Migrating database: Adding 'strategic_role' column to nodes table...")
+                        conn.execute("ALTER TABLE nodes ADD COLUMN strategic_role TEXT")
+
+                    if 'energy_impact' not in columns:
+                        logger.info("Migrating database: Adding 'energy_impact' column to nodes table...")
+                        conn.execute("ALTER TABLE nodes ADD COLUMN energy_impact INTEGER")
                         
                 except Exception as e:
                     logger.warning(f"Database migration check warning: {e}")
@@ -104,28 +114,39 @@ class GraphStore:
             raise
 
     # --- 通用写入 ---
-    def _upsert_node(self, conn, user_id, node_id, node_type, name="", content="", status="confirmed", time_metadata=None, **kwargs):
+    def _upsert_node(self, conn, user_id, node_id, node_type, name="", content="", status="confirmed", time_metadata=None, strategic_role=None, energy_impact=None, **kwargs):
         attributes = json.dumps(kwargs, ensure_ascii=False)
         time_meta_json = json.dumps(time_metadata, ensure_ascii=False) if time_metadata else None
         
         # 检查表是否有新列，如果没有则添加（为了兼容旧库）
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO nodes (id, user_id, type, name, content, attributes, status, time_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (node_id, user_id, node_type, name, content, attributes, status, time_meta_json)
+                "INSERT OR REPLACE INTO nodes (id, user_id, type, name, content, attributes, status, time_metadata, strategic_role, energy_impact) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (node_id, user_id, node_type, name, content, attributes, status, time_meta_json, strategic_role, energy_impact)
             )
         except sqlite3.OperationalError:
-            # 如果是旧表结构，先尝试添加列
+            # 如果是旧表结构，先尝试添加列 (虽然 _init_db 应该已经处理了，但为了健壮性保留)
             try:
-                conn.execute("ALTER TABLE nodes ADD COLUMN status TEXT DEFAULT 'confirmed'")
-                conn.execute("ALTER TABLE nodes ADD COLUMN time_metadata JSON")
+                # 尝试添加可能缺失的列
+                columns_to_add = {
+                    "status": "TEXT DEFAULT 'confirmed'",
+                    "time_metadata": "JSON",
+                    "strategic_role": "TEXT",
+                    "energy_impact": "INTEGER"
+                }
+                for col, type_def in columns_to_add.items():
+                    try:
+                        conn.execute(f"ALTER TABLE nodes ADD COLUMN {col} {type_def}")
+                    except sqlite3.OperationalError:
+                        pass # 列可能已存在
+
                 # 重试插入
                 conn.execute(
-                    "INSERT OR REPLACE INTO nodes (id, user_id, type, name, content, attributes, status, time_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (node_id, user_id, node_type, name, content, attributes, status, time_meta_json)
+                    "INSERT OR REPLACE INTO nodes (id, user_id, type, name, content, attributes, status, time_metadata, strategic_role, energy_impact) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (node_id, user_id, node_type, name, content, attributes, status, time_meta_json, strategic_role, energy_impact)
                 )
             except Exception as e:
-                logger.error(f"Schema migration failed: {e}")
+                logger.error(f"Schema migration failed in _upsert_node: {e}")
                 raise
 
     def _upsert_edge(self, conn, user_id, source, target, relation, **kwargs):
@@ -213,12 +234,38 @@ class GraphStore:
             logger.error(f"Add Log Failed: {e}")
             return False
 
+    def add_person(self, user_id: str, name: str, role: str, energy_impact: int) -> bool:
+        """
+        [Phase 2] 新增关键人物节点
+        role: Mentor, Partner, Drainer
+        energy_impact: +1 (Boost), -1 (Drain), 0 (Neutral)
+        """
+        try:
+            self._ensure_tables()
+            person_id = self._get_stable_id(name)
+            with self._lock, self._get_conn() as conn:
+                self._upsert_node(
+                    conn,
+                    user_id,
+                    person_id,
+                    "Person",
+                    name=name,
+                    strategic_role=role,
+                    energy_impact=energy_impact,
+                    status="confirmed"
+                )
+            return True
+        except Exception as e:
+            logger.error(f"Add Person Failed: {e}")
+            return False
+
     def add_concepts_batch(self, user_id: str, concepts: List[Dict[str, Any]]) -> bool:
         try:
             self._ensure_tables()
             data = []
             for c in concepts:
                 attr = json.dumps({"vector": c.get('vector')}, ensure_ascii=False)
+                # 注意：这里只插入基本字段，不覆盖可能已存在的 Person 特殊字段
                 data.append((c['id'], user_id, "Concept", c['name'], "", attr))
             with self._lock, self._get_conn() as conn:
                 conn.executemany(
@@ -392,13 +439,14 @@ class GraphStore:
             links = []
             with self._get_conn() as conn:
                 # 1. 获取该用户的节点
+                # Phase 2: 获取 strategic_role 和 energy_impact
                 c_rows = conn.execute(
-                    "SELECT id, type, name, content, attributes FROM nodes WHERE user_id=? AND type='Concept' ORDER BY created_at DESC LIMIT 300",
+                    "SELECT id, type, name, content, attributes, strategic_role, energy_impact FROM nodes WHERE user_id=? AND type='Concept' ORDER BY created_at DESC LIMIT 300",
                     (actual_user_id,)
                 ).fetchall()
                 
                 l_rows = conn.execute(
-                    "SELECT id, type, name, content, attributes FROM nodes WHERE user_id=? AND type!='Concept' ORDER BY created_at DESC LIMIT 200",
+                    "SELECT id, type, name, content, attributes, strategic_role, energy_impact FROM nodes WHERE user_id=? AND type!='Concept' ORDER BY created_at DESC LIMIT 200",
                     (actual_user_id,)
                 ).fetchall()
                 
@@ -413,6 +461,12 @@ class GraphStore:
                         "类型": r['type'],
                         "描述": r['content'] or "无详细内容"
                     }
+                    
+                    # Phase 2: 显示战略属性
+                    if r['strategic_role']:
+                        display_data["战略角色"] = r['strategic_role']
+                    if r['energy_impact']:
+                        display_data["能量影响"] = str(r['energy_impact'])
                     
                     # 如果有档案信息，也加入显示
                     attrs = json.loads(r['attributes']) if r['attributes'] else {}

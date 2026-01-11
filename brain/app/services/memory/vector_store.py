@@ -38,6 +38,12 @@ class VectorStore:
                 metadata={"hnsw:space": "cosine"},
                 embedding_function=None
             )
+            # 新增：愿景切片集合 (Phase 1)
+            self.vision_collection = self.client.get_or_create_collection(
+                name="endgame_vision",
+                metadata={"hnsw:space": "cosine"},
+                embedding_function=None
+            )
             
             # 自动维度检测与重置
             self._check_and_reset_if_needed()
@@ -65,6 +71,8 @@ class VectorStore:
         try:
             self.client.delete_collection("endgame_memory")
             self.client.delete_collection("endgame_concepts")
+            self.client.delete_collection("endgame_experiences")
+            self.client.delete_collection("endgame_vision")
             self._initialize_client()
         except Exception: pass
 
@@ -147,5 +155,23 @@ class VectorStore:
         """检索相关的历史经验"""
         try:
             results = self.experience_collection.query(query_embeddings=[query_vector], n_results=n_results)
+            return results['documents'][0] if results['documents'] else []
+        except Exception: return []
+
+    def add_vision_vector(self, vision_id: str, text: str, vector: List[float]):
+        """将愿景切片存入向量库"""
+        try:
+            self.vision_collection.add(
+                ids=[vision_id],
+                embeddings=[vector],
+                documents=[text]
+            )
+        except Exception as e:
+            logger.error(f"愿景向量化失败: {e}")
+            
+    def search_vision(self, query_vector: List[float], n_results: int = 3) -> List[str]:
+        """检索相关的愿景内容"""
+        try:
+            results = self.vision_collection.query(query_embeddings=[query_vector], n_results=n_results)
             return results['documents'][0] if results['documents'] else []
         except Exception: return []
