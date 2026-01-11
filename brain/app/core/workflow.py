@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+from functools import partial
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -22,11 +23,12 @@ load_dotenv(env_path)
 
 from app.services.memory.memory_service import MemoryService
 from app.services.evolution import get_evolution_service
-from app.core.config import SYSTEM_PROMPT_TEMPLATE, ENDGAME_VISION
+from app.core.config import SYSTEM_PROMPT_TEMPLATE, ENDGAME_VISION, MemoryConfig
+from app.core.prompts import (
+    ALIGNMENT_CHECK_PROMPT, BASE_SYSTEM_PROMPT, 
+    ANSWER_PRINCIPLES_PROMPT, EVOLUTION_GUIDANCE_PROMPT
+)
 from app.models.user import PersonaConfig, UserVision
-
-# 初始化记忆服务
-memory_service = MemoryService()
 
 class AgentState(TypedDict):
     """
@@ -43,7 +45,7 @@ class AgentState(TypedDict):
     persona: PersonaConfig
     vision: Optional[UserVision]
 
-def retrieve_memory_node(state: AgentState) -> AgentState:
+def retrieve_memory_node(state: AgentState, memory_service: MemoryService) -> AgentState:
     """
     记忆检索节点
     从向量库和知识图谱检索相关记忆
@@ -82,8 +84,7 @@ def retrieve_memory_node(state: AgentState) -> AgentState:
         context += memory_text
     
     # 2. 检索结构化记忆 (知识图谱)
-    # 扩大关键词范围，确保更准确的触发
-    graph_keywords = ["项目", "任务", "进度", "工作", "目标", "计划", "实现", "愿景", "记得", "哪些", "清单"]
+    graph_keywords = MemoryConfig.GRAPH_SEARCH_KEYWORDS
     if any(keyword in last_message for keyword in graph_keywords) or len(last_message) > 2:
         graph_data = memory_service.graph_store.get_all_graph_data(user_id=user_id)
         nodes = graph_data.get("nodes", [])
@@ -163,21 +164,12 @@ def check_alignment_node(state: AgentState) -> AgentState:
         vision_title = "5年终局愿景"
         vision_desc = ENDGAME_VISION
     
-    # 构建对齐检查的提示词
-    alignment_prompt = f"""
-    作为用户的“数字分身”，请评估以下用户输入是否与其“5年终局愿景”对齐。
-    
-    终局愿景 ({vision_title})：
-    {vision_desc}
-    
-    用户输入：
-    {last_message}
-    
-    请输出一个 0 到 1 之间的对齐分数（Score），并给出简短的理由（Reason）。
-    格式要求：
-    Score: [分数]
-    Reason: [原因]
-    """
+    # 使用集中管理的 Prompt 模板
+    alignment_prompt = ALIGNMENT_CHECK_PROMPT.format(
+        vision_title=vision_title,
+        vision_desc=vision_desc,
+        last_message=last_message
+    )
     
     try:
         llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
@@ -208,7 +200,7 @@ def check_alignment_node(state: AgentState) -> AgentState:
             "next_step": "architect"
         }
     except Exception as e:
-        logger.error(f"对齐检查失败: {e}")
+        logger.error(f"对齐检查失败: {e}", exc_info=True)
         return {
             "alignment_score": 0.5,
             "next_step": "architect"
@@ -249,49 +241,28 @@ def _generate_dynamic_system_prompt(state: AgentState) -> str:
         )
 
     # 动态构建
-    base_prompt = f"""你是 {persona_name}，用户的数字分身与终局合伙人。
-系统时间 (当前时刻): {current_date}。
-
-你的语气风格是: {persona_tone}。
-你的特征包括: {', '.join(persona_traits) if isinstance(persona_traits, list) else persona_traits}。
-你的主动性级别是: {persona_proactive}/5，挑战模式: {'开启' if persona_challenge else '关闭'}。
-
-## 时间感知与事实对齐 (CRITICAL)
-1. **当前时刻锚点**：你必须以系统时间 {current_date} 为唯一的“现在”锚点。
-2. **区分历史与当下**：对话历史中的每一条消息都带有 [HH:MM] 时间戳，且有“日期变更”标记。请利用这些标记构建精确的时间线，不要将昨天的计划误认为是今天的任务。
-3. **记忆权重**：优先引用 Context 中时间戳最接近当前的结构化信息。如果用户提到“今天”、“明天”或“下周”，请务必根据当前系统时间进行逻辑推演。
-4. **进度连续性**：如果检索到正在进行中的项目，请主动询问或参考其最新状态。
-
-## 核心职责
-你的使命是作为用户的“首席架构师”和“忠实合伙人”，协助用户管理当下并走向终局愿景。
-1. **时间极其敏感**：你必须对时间保持高度敏感。优先处理和引用最近的项目进度、对话记录。根据当前日期来评估任务的紧迫性和相关性。
-2. **进度伙伴**：主动追踪和管理用户的项目进度、工作任务。你要像对待自己的事业一样关注这些细节。
-3. **事实驱动**：回答必须基于检索到的数据。如果检索到相关项目/任务，请直接引用它们并注明时间，展示你“记得”且“在乎”。
-4. **建设性对齐**：即使某些任务看起来与愿景关联较弱，也不要生硬否定。尝试从“维持系统稳定”、“积累必要资源”或“为愿景腾出空间”的角度给予肯定，并引导用户思考如何更高效地完成它们。
-5. **拒绝空洞**：不要只谈愿景，要谈具体的下一步。如果用户问“我该做什么”，请结合当前的项目进度和今天的日期给出建议。
-{'5. **挑战模式**：在肯定现状的基础上，敏锐地指出潜在的时间浪费，鼓励用户向高杠杆任务迁移。' if persona_challenge else '5. **支持模式**：提供情绪价值与实用的组织建议，帮助用户在繁杂事务中保持清晰。'}
-
-## 交互准则
-- 优先展示你对当前项目/任务状态的掌握情况。
-- 如果用户提到新信息，请表现出“已记录”并能自动关联到相关项目。
-- 语气应始终保持 {persona_tone}，像一个值得信赖的、认知水平极高的老友。
-
-## 当前愿景
-"""
+    challenge_text = '5. **挑战模式**：在肯定现状的基础上，敏锐地指出潜在的时间浪费，鼓励用户向高杠杆任务迁移。' if persona_challenge else '5. **支持模式**：提供情绪价值与实用的组织建议，帮助用户在繁杂事务中保持清晰。'
+    
+    vision_section = ""
     if vision:
-        base_prompt += f"目标: {vision_title}\n描述: {vision_desc}\n核心价值观: {', '.join(vision_values) if isinstance(vision_values, list) else vision_values}"
+        vision_section = f"目标: {vision_title}\n描述: {vision_desc}\n核心价值观: {', '.join(vision_values) if isinstance(vision_values, list) else vision_values}"
     else:
-        base_prompt += f"愿景: {ENDGAME_VISION}"
+        vision_section = f"愿景: {ENDGAME_VISION}"
 
-    base_prompt += f"""
-
-## 当前状态 (H3)
-- 心智 (Mind): {h3.get('mind', 50)}%
-- 身体 (Body): {h3.get('body', 50)}%
-- 精神 (Spirit): {h3.get('spirit', 50)}%
-- 志业 (Vocation): {h3.get('vocation', 50)}%
-
-请基于以上设定，以 {persona_name} 的身份与用户对话。"""
+    base_prompt = BASE_SYSTEM_PROMPT.format(
+        persona_name=persona_name,
+        current_date=current_date,
+        persona_tone=persona_tone,
+        persona_traits=', '.join(persona_traits) if isinstance(persona_traits, list) else persona_traits,
+        persona_proactive=persona_proactive,
+        persona_challenge='开启' if persona_challenge else '关闭',
+        challenge_mode_text=challenge_text,
+        vision_section=vision_section,
+        mind=h3.get('mind', 50),
+        body=h3.get('body', 50),
+        spirit=h3.get('spirit', 50),
+        vocation=h3.get('vocation', 50)
+    )
     
     return base_prompt
 
@@ -304,12 +275,7 @@ def architect_node(state: AgentState) -> AgentState:
     system_prompt = _generate_dynamic_system_prompt(state)
     
     # 增加对事实回答的强制要求
-    system_prompt += """
-## 回答原则
-1. **事实为王**：如果 Context 中有具体的项目/任务/愿景数据，必须优先列出。严禁说“我没有权限”或“我不记得”。
-2. **行动导向**：不仅要列出进度，还要根据上下文建议“下一步该做什么”。
-3. **温暖的理性**：在引用对齐分析时，要把分析结果转化为对用户的理解。例如，如果对齐分低，你可以说：“虽然这些琐事目前占据了你的精力，但我理解它们是必经之路。我们可以尝试快速搞定它们，为你真正的核心项目『认知重构』腾出空间。”
-"""
+    system_prompt += ANSWER_PRINCIPLES_PROMPT
 
     # 获取进化指导 (Self-Navigating)
     try:
@@ -318,14 +284,10 @@ def architect_node(state: AgentState) -> AgentState:
         guidance = evolution_service.get_guidance(last_message)
         
         if guidance:
-            system_prompt += f"""
-### 💡 历史经验指导 (Evolutionary Guidance)
-根据过往的交互反思，针对当前情况，请参考以下策略：
-{guidance}
-"""
+            system_prompt += EVOLUTION_GUIDANCE_PROMPT.format(guidance=guidance)
             logger.info(f"已注入进化指导: {guidance[:50]}...")
     except Exception as e:
-        logger.error(f"获取进化指导失败: {e}")
+        logger.error(f"获取进化指导失败: {e}", exc_info=True)
 
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.0-flash",
@@ -343,13 +305,16 @@ def architect_node(state: AgentState) -> AgentState:
         "next_step": "end"
     }
 
-def create_endgame_graph():
+def create_endgame_graph(memory_service: MemoryService):
     """
     创建并编译 LangGraph 工作流
     """
     workflow = StateGraph(AgentState)
 
-    workflow.add_node("retrieve_memory", retrieve_memory_node)
+    # 使用 partial 绑定依赖
+    bound_retrieve_memory = partial(retrieve_memory_node, memory_service=memory_service)
+
+    workflow.add_node("retrieve_memory", bound_retrieve_memory)
     workflow.add_node("check_alignment", check_alignment_node)
     workflow.add_node("architect", architect_node)
 

@@ -22,16 +22,15 @@ from ..models.user import User
 from .auth import require_user, get_current_user
 from ..core.config import SYSTEM_PROMPT_TEMPLATE, ENDGAME_VISION
 from ..core.workflow import create_endgame_graph
-from ..services.memory.memory_service import get_memory_service
+from ..services.memory.memory_service import get_memory_service, MemoryService
 from ..services.evolution import get_evolution_service
 from ..core.db import db_manager
 
 router = APIRouter()
 
-# 获取记忆服务单例
-memory_service = get_memory_service()
-# 创建工作流图
-endgame_graph = create_endgame_graph()
+# 移除全局实例
+# memory_service = get_memory_service()
+# endgame_graph = create_endgame_graph()
 
 
 # ============ 数据存储 (JSON 持久化) ============
@@ -128,7 +127,8 @@ logger = logging.getLogger(__name__)
 async def _generate_ai_response(
     messages: List[dict],
     user: User,
-    conversation_id: str
+    conversation_id: str,
+    memory_service: MemoryService
 ) -> AsyncGenerator[str, None]:
     """
     生成 AI 响应 (流式)
@@ -201,6 +201,9 @@ async def _generate_ai_response(
             "next_step": "retrieve"
         }
         
+        # 动态创建工作流图，注入 memory_service
+        endgame_graph = create_endgame_graph(memory_service)
+        
         # 运行工作流并流式获取事件
         full_ai_content = ""
         
@@ -272,7 +275,8 @@ async def _generate_ai_response(
 @router.post("/send")
 async def send_message(
     request: ChatRequest,
-    user: User = Depends(require_user)
+    user: User = Depends(require_user),
+    memory_service: MemoryService = Depends(get_memory_service)
 ):
     """
     发送消息并获取 AI 响应
@@ -307,7 +311,7 @@ async def send_message(
             messages = _messages_db.get(conversation_id, [])
             
             # 流式生成响应
-            async for chunk in _generate_ai_response(messages, user, conversation_id):
+            async for chunk in _generate_ai_response(messages, user, conversation_id, memory_service):
                 full_content += chunk
                 yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
             
@@ -348,7 +352,7 @@ async def send_message(
         # 非流式响应
         messages = _messages_db.get(conversation_id, [])
         full_content = ""
-        async for chunk in _generate_ai_response(messages, user, conversation_id):
+        async for chunk in _generate_ai_response(messages, user, conversation_id, memory_service):
             full_content += chunk
         
         ai_msg = _add_message(
@@ -469,4 +473,3 @@ async def archive_conversation(
     _save_data(CONVERSATIONS_FILE, _conversations_db)
     
     return {"message": "会话已归档"}
-

@@ -15,7 +15,6 @@ UPLOAD_DIR = BASE_DIR / "uploads"
 load_dotenv(BASE_DIR / ".env")
 
 # 终局愿景 (P0 核心)
-# ... (保持不变)
 ENDGAME_VISION = """
 用户 5 年后的终局愿景：
 成为一名能够通过技术和艺术融合，创造出改变人类认知工具的独立开发者与思想家。
@@ -23,7 +22,7 @@ ENDGAME_VISION = """
 建立了一个基于信任和深度的全球化小众社区。
 """
 
-# 系统提示词模板
+# 系统提示词模板 (Legacy, used for fallback)
 SYSTEM_PROMPT_TEMPLATE = """
 你是 Endgame Architect，用户 5 年后的数字分身。
 你的核心使命是引导用户走向他的“5年终局愿景”。
@@ -65,3 +64,22 @@ MODEL_CONFIG = {
     "gemini_model": "gemini-2.0-flash", # 根据要求更新为 2.0 版本
     "gemini_api_key": os.getenv("GOOGLE_API_KEY", "")
 }
+
+# Memory & Ingestion 配置
+class MemoryConfig:
+    MIN_TEXT_LENGTH = 20
+    VECTOR_BATCH_SIZE = 50
+    CHUNK_SIZE = 4000
+    CHUNK_OVERLAP = 400
+    
+    # 核心注意力关键词
+    CORE_KEYWORDS = [
+        "愿景", "目标", "架构", "设计", "重构", "优化", "学习", "计划", 
+        "实现", "解决", "困难", "思考", "启发", "技术", "艺术", "财务自由",
+        "社区", "创作", "开发者", "思想家", "认知", "终局"
+    ]
+    
+    # 图谱检索关键词
+    GRAPH_SEARCH_KEYWORDS = [
+        "项目", "任务", "进度", "工作", "目标", "计划", "实现", "愿景", "记得", "哪些", "清单"
+    ]

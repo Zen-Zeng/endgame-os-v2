@@ -18,19 +18,16 @@ from ..models.user import User
 from .auth import require_user
 
 from ..services.memory.memory_service import get_memory_service
+from ..services.ingestion.service import get_ingestion_service
 from ..services.memory.consolidator import MemoryConsolidator
 from ..core.config import UPLOAD_DIR
 
-from concurrent.futures import ThreadPoolExecutor
+# 移除 ThreadPoolExecutor，不再需要
 
 router = APIRouter()
 
 # 共享任务状态数据库
 _tasks_db: Dict[str, Dict] = {}  # task_id -> task_status
-
-# 专用线程池用于处理重型 NLP 任务，避免阻塞主 API 线程池
-# 限制为 1 个 worker 也是为了防止 GPU/显存 竞争导致卡顿
-training_executor = ThreadPoolExecutor(max_workers=1)
 
 logger = logging.getLogger(__name__)
 
@@ -62,21 +59,17 @@ async def _process_consolidation_task(task_id: str, user_id: str):
         _tasks_db[task_id]["message"] = f"合并失败: {str(e)}"
 
 async def _process_training_task(task_id: str, filename: str, user_id: str):
-    """异步处理训练任务，调用真实的 MemoryService"""
+    """异步处理训练任务，调用 IngestionService"""
     try:
-        service = get_memory_service()
-        loop = asyncio.get_event_loop()
+        service = get_ingestion_service()
         
         _tasks_db[task_id]["status"] = "processing"
         _tasks_db[task_id]["progress"] = 10
         _tasks_db[task_id]["message"] = "正在解析文档..."
         
-        # 定义进度回调
         def on_progress(p, msg):
-            # 使用 call_soon_threadsafe 确保在主循环中更新状态
-            loop.call_soon_threadsafe(
-                lambda: _tasks_db[task_id].update({"progress": p, "message": msg})
-            )
+            # 直接更新状态 (因为现在是 async 环境，不需要 threadsafe)
+            _tasks_db[task_id].update({"progress": p, "message": msg})
 
         # 获取完整文件路径
         file_path = UPLOAD_DIR / filename
@@ -96,17 +89,16 @@ async def _process_training_task(task_id: str, filename: str, user_id: str):
         _tasks_db[task_id]["progress"] = 30
         _tasks_db[task_id]["message"] = "正在初始化模型并提取实体..."
         
-        # 调用真实的 ingest_file (使用专用线程池)
-        # 传递 user_id 确保数据存入正确用户名下
-        result = await loop.run_in_executor(
-            training_executor, 
-            service.ingest_file, 
-            str(file_path), 
-            user_id, 
-            on_progress
-        )
+        # 1. 调用 ingest_file (异步)
+        result = await service.ingest_file(str(file_path), user_id, on_progress)
         
         if result.get("success"):
+            # 2. 如果有图谱任务，继续执行 (串行化处理，确保完成后再标记 task completed)
+            if "graph_task_args" in result:
+                _tasks_db[task_id]["message"] = "正在提取知识图谱..."
+                args = result["graph_task_args"]
+                await service.process_graph_task(*args)
+            
             _tasks_db[task_id]["status"] = "completed"
             _tasks_db[task_id]["progress"] = 100
             _tasks_db[task_id]["message"] = "训练完成"
@@ -118,11 +110,6 @@ async def _process_training_task(task_id: str, filename: str, user_id: str):
         _tasks_db[task_id]["status"] = "failed"
         _tasks_db[task_id]["error"] = str(e)
         _tasks_db[task_id]["message"] = f"错误: {str(e)}"
-
-# 移除模拟数据存储和初始化
-# _nodes_db: dict[str, dict] = {}
-# _relations_db: dict[str, dict] = {}
-
 
 @router.post("/train")
 async def start_training(
@@ -165,7 +152,7 @@ async def _process_batch_training(task_id: str, filenames: List[str], user_id: s
             _tasks_db[task_id]["message"] = f"正在处理第 {i+1}/{total_files} 个文件: {filename}"
             _tasks_db[task_id]["progress"] = base_progress
             
-            # 调用原有的处理逻辑（复用 _process_training_task 的核心部分）
+            # 处理单个文件
             await _process_single_file_in_batch(task_id, filename, user_id, base_progress, 100 // total_files)
             
         _tasks_db[task_id]["status"] = "completed"
@@ -180,8 +167,7 @@ async def _process_batch_training(task_id: str, filenames: List[str], user_id: s
 
 async def _process_single_file_in_batch(task_id: str, filename: str, user_id: str, base_progress: int, weight: int):
     """在批量任务中处理单个文件"""
-    service = get_memory_service()
-    loop = asyncio.get_event_loop()
+    service = get_ingestion_service()
     
     # 查找文件路径
     file_path = UPLOAD_DIR / user_id / filename
@@ -198,39 +184,39 @@ async def _process_single_file_in_batch(task_id: str, filename: str, user_id: st
         logger.warning(f"文件不存在，跳过: {filename}")
         return
 
-    # 简单的进度回调映射
+    # 进度回调
     def on_progress(p, msg):
         current_p = base_progress + int((p / 100) * weight)
-        loop.call_soon_threadsafe(
-            lambda: _tasks_db[task_id].update({"progress": current_p, "message": f"[{filename}] {msg}"})
-        )
+        _tasks_db[task_id].update({"progress": current_p, "message": f"[{filename}] {msg}"})
 
-    # 执行训练
-    await loop.run_in_executor(
-        training_executor, 
-        service.ingest_file, 
-        str(file_path), 
-        user_id, 
-        on_progress
-    )
-
-    # 训练成功后，更新 archives_files.json 中的状态
-    try:
-        from .archives import _files_db, _save_db, FILES_FILE
-        # 查找对应的文件 ID
-        file_id = None
-        for fid, fdoc in _files_db.items():
-            if fdoc.get("filename") == filename and fdoc.get("user_id") == user_id:
-                file_id = fid
-                break
-        
-        if file_id:
-            _files_db[file_id]["is_processed"] = True
-            _files_db[file_id]["updated_at"] = datetime.now().isoformat()
-            _save_db(FILES_FILE, _files_db)
-            logger.info(f"已更新文件状态为已训练: {filename} (ID: {file_id})")
-    except Exception as e:
-        logger.error(f"更新文件训练状态失败: {e}")
+    # 执行训练 (异步)
+    result = await service.ingest_file(str(file_path), user_id, on_progress)
+    
+    if result.get("success"):
+        # 执行后续图谱任务
+        if "graph_task_args" in result:
+             # 更新消息
+            _tasks_db[task_id]["message"] = f"[{filename}] 正在提取知识图谱..."
+            args = result["graph_task_args"]
+            await service.process_graph_task(*args)
+            
+        # 训练成功后，更新 archives_files.json 中的状态
+        try:
+            from .archives import _files_db, _save_db, FILES_FILE
+            # 查找对应的文件 ID
+            file_id = None
+            for fid, fdoc in _files_db.items():
+                if fdoc.get("filename") == filename and fdoc.get("user_id") == user_id:
+                    file_id = fid
+                    break
+            
+            if file_id:
+                _files_db[file_id]["is_processed"] = True
+                _files_db[file_id]["updated_at"] = datetime.now().isoformat()
+                _save_db(FILES_FILE, _files_db)
+                logger.info(f"已更新文件状态为已训练: {filename} (ID: {file_id})")
+        except Exception as e:
+            logger.error(f"更新文件训练状态失败: {e}")
 
 @router.get("/tasks/{task_id}")
 @router.get("/train/status/{task_id}")
@@ -479,4 +465,3 @@ async def clear_memory(user: User = Depends(require_user)):
     except Exception as e:
         logger.error(f"清除记忆失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
