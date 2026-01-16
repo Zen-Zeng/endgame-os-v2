@@ -4,7 +4,6 @@ FastAPI 主应用入口
 """
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from langchain_core.messages import HumanMessage
@@ -94,21 +93,13 @@ app.add_middleware(
 # 注册 API 路由
 app.include_router(api_router)
 
-# 挂载前端静态文件 (如果存在)
-FRONTEND_DIST = Path(__file__).parent.parent.parent / "face" / "dist"
-if FRONTEND_DIST.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
-    logger.info(f"已挂载前端静态文件: {FRONTEND_DIST}")
-else:
-    logger.warning(f"未找到前端静态文件目录: {FRONTEND_DIST}，将只提供 API 服务")
-    @app.get("/")
-    async def root():
-        return {
-            "message": "Endgame OS Brain API",
-            "status": "running",
-            "version": "2.0.0",
-            "frontend": "Not mounted (run 'npm run build' in face directory)"
-        }
+@app.get("/")
+async def root():
+    return {
+        "message": "Endgame OS Brain API",
+        "status": "running",
+        "version": "2.0.0"
+    }
 
 # 移除全局 MemoryService，使用 Depends 注入
 # memory_service = MemoryService() 

@@ -70,7 +70,7 @@ export default function LoginPage() {
       
       // 登录成功后，检查是否需要引导流程
       if (isOnboardingComplete) {
-        navigate('/dashboard');
+        navigate('/');
       } else {
         nextStep(); // 进入下一步：persona 设置
         navigate('/onboarding/persona');

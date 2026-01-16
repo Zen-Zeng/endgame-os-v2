@@ -74,9 +74,11 @@ export default function ChatPage() {
           },
           stream: true
         },
-        (chunk) => {
+        (chunk: any) => {
           if (chunk.type === 'content' && chunk.content) {
             updateLastMessage(chunk.content);
+          } else if (chunk.type === 'meta' && chunk.metadata) {
+            updateLastMessage(null, chunk.metadata);
           } else if (chunk.type === 'error') {
             setError(chunk.content || '生成出错');
           }
@@ -93,7 +95,7 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-var(--md-sys-spacing-8))] max-w-4xl mx-auto w-full relative">
+    <div className="flex flex-col h-full max-w-4xl mx-auto w-full relative">
       
       {/* 1. CHAT HEADER - 简约 M3 风格 */}
       <header className="flex items-center justify-between py-4 px-2">
@@ -112,13 +114,37 @@ export default function ChatPage() {
             </div>
           </div>
         </div>
-        <button 
-          onClick={handleClearHistory}
-          className="p-2 rounded-full hover:bg-[var(--md-sys-color-error-container)] hover:text-[var(--md-sys-color-error)] transition-all group relative"
-          title="清除所有历史记录"
-        >
-          <Trash2 size={20} className="text-[var(--md-sys-color-on-surface-variant)] group-hover:text-[var(--md-sys-color-error)]" />
-        </button>
+
+        <div className="flex items-center gap-4">
+          {/* Energy Status Capsules */}
+          <div className="flex items-center gap-1.5">
+            {[
+              { label: 'M', value: scores.mind, color: 'bg-blue-500' },
+              { label: 'B', value: scores.body, color: 'bg-green-500' },
+              { label: 'S', value: scores.spirit, color: 'bg-purple-500' },
+              { label: 'V', value: scores.vocation, color: 'bg-amber-500' },
+            ].map((item) => (
+              <div 
+                key={item.label} 
+                className="flex items-center gap-1 px-2 py-1 rounded-[var(--md-sys-shape-corner-small)] bg-[var(--md-sys-color-surface-container)] border border-[var(--md-sys-color-outline-variant)]/40 hover:bg-[var(--md-sys-color-surface-container-high)] transition-colors cursor-help" 
+                title={`${item.label}: ${item.value}%`}
+              >
+                <span className={clsx("w-1.5 h-1.5 rounded-full", item.color)}></span>
+                <span className="text-xs font-mono font-medium opacity-80">{item.value}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="w-px h-6 bg-[var(--md-sys-color-outline-variant)]/40 mx-1"></div>
+
+          <button 
+            onClick={handleClearHistory}
+            className="p-2 rounded-full hover:bg-[var(--md-sys-color-error-container)] hover:text-[var(--md-sys-color-error)] transition-all group relative"
+            title="清除所有历史记录"
+          >
+            <Trash2 size={20} className="text-[var(--md-sys-color-on-surface-variant)] group-hover:text-[var(--md-sys-color-error)]" />
+          </button>
+        </div>
       </header>
 
       {/* 2. MESSAGES LIST */}
@@ -179,6 +205,16 @@ export default function ChatPage() {
                      msg.content
                    ) : (
                      <div className="prose prose-sm prose-invert max-w-none text-[var(--md-sys-color-on-surface-variant)]">
+                       {msg.metadata?.strategies && (
+                        <div className="mb-3 flex flex-wrap gap-2 not-prose">
+                          {(msg.metadata.strategies as string[]).map((strategy, i) => (
+                            <span key={i} className="px-2 py-0.5 rounded-full bg-[var(--md-sys-color-primary-container)] text-[var(--md-sys-color-primary)] text-[10px] border border-[var(--md-sys-color-outline)] flex items-center gap-1 w-fit font-medium">
+                              <Sparkles className="w-3 h-3" />
+                              {strategy}
+                            </span>
+                          ))}
+                        </div>
+                       )}
                        <ReactMarkdown>
                          {msg.content}
                        </ReactMarkdown>

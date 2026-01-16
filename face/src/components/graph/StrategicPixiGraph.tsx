@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
+import * as d3 from 'd3-force';
 import { useStrategicData } from './useStrategicData';
 import type { StrategicNode } from './useStrategicData';
 
@@ -11,13 +12,35 @@ const NODE_STYLES: Record<string, { color: string, borderColor: string }> = {
   Project: { color: '#E8DEF8', borderColor: '#65558F' }, // Secondary Container
   Task:    { color: '#E6E1E5', borderColor: '#484649' }, // Surface Variant
   Person:  { color: '#C2E7FF', borderColor: '#004A77' }, // Info
-  Concept: { color: '#C4EED0', borderColor: '#0F5223' }  // Success
+  Concept: { color: '#C4EED0', borderColor: '#0F5223' }, // Success
+  Insight: { color: '#FFF4B4', borderColor: '#735C00' }  // Warning/Insight
 };
 
-const StrategicPixiGraph = () => {
+interface StrategicPixiGraphProps {
+  viewType?: 'global' | 'strategic' | 'people' | 'staging';
+  refreshKey?: number;
+  alignmentThreshold?: number; // Phase 4
+  showImplicitLinks?: boolean; // Phase 4
+  onMergeNodes?: (sourceId: string, targetId: string) => void;
+  onNodeClick?: (node: StrategicNode) => void;
+}
+
+const StrategicPixiGraph = ({ 
+  viewType = 'strategic',
+  refreshKey = 0,
+  alignmentThreshold = 0,
+  showImplicitLinks = false,
+  onMergeNodes,
+  onNodeClick
+}: StrategicPixiGraphProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
-  const { data, loading, error } = useStrategicData();
+  const { data, loading, error, refresh } = useStrategicData(viewType);
+
+  // 监听外部触发的刷新
+  useEffect(() => {
+    refresh();
+  }, [viewType, refreshKey, refresh]);
   
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const [hoverNode, setHoverNode] = useState<StrategicNode | null>(null);
@@ -32,34 +55,54 @@ const StrategicPixiGraph = () => {
 
   // Custom Forces for Strategic Compass Layout
 
+  // 过滤数据 (Phase 4)
+  const filteredData = useMemo(() => {
+    if (!data || !data.nodes) return { nodes: [], links: [] };
+    
+    // 如果阈值为 0，不进行对齐度过滤
+    if (alignmentThreshold === 0) return data;
+    
+    // 过滤节点
+    const validNodes = data.nodes.filter(n => {
+        // Self 和 Vision 永远保留
+        if (n.type === 'Self' || n.type === 'Vision') return true;
+        // 如果节点没有 alignment_score，假设为 0 (或者保留？这里假设过滤掉不达标的)
+        const score = (n as any).alignment_score || 0;
+        return score >= alignmentThreshold;
+    });
+    
+    const validNodeIds = new Set(validNodes.map(n => n.id));
+    
+    // 过滤连线
+    const validLinks = data.links.filter(l => {
+        const sourceId = typeof l.source === 'object' ? (l.source as any).id : l.source;
+        const targetId = typeof l.target === 'object' ? (l.target as any).id : l.target;
+        return validNodeIds.has(sourceId) && validNodeIds.has(targetId);
+    });
+    
+    return { nodes: validNodes, links: validLinks };
+  }, [data, alignmentThreshold]);
+
   useEffect(() => {
     if (graphRef.current) {
         // Access underlying d3 simulation
-        const simulation = graphRef.current.d3Force('link').distance(50); // Default link distance
+        graphRef.current.d3Force('link').distance(80); // 增加连线距离
         
         // Define Custom Forces
-        // 1. Center Self (Force 0)
-        // 2. Vision Up (Force Y < 0)
-        // 3. Goal Sides (Force X)
-        // 4. Project/Task Down (Force Y > 0)
-        
-        graphRef.current.d3Force('y', (d3: any) => {
-            return (node: any) => {
-                // Return target Y based on type
-                switch(node.type) {
-                    case 'Self': return 0;
-                    case 'Vision': return -200; // Pull Up
-                    case 'Goal': return 0;      // Center Vertically
-                    case 'Project': return 200; // Pull Down
-                    case 'Task': return 400;    // Pull Further Down
-                    default: return 0;
-                }
-            };
-        });
+        // 使用 d3.forceY() 来强制分层
+        graphRef.current.d3Force('y', d3.forceY().y((node: any) => {
+            switch(node.type) {
+                case 'Self': return 0;
+                case 'Vision': return -300; // 愿景在最上方
+                case 'Goal': return -150;   // 目标在愿景下方
+                case 'Project': return 150; // 项目在下方
+                case 'Task': return 300;    // 任务在最下方
+                default: return 0;
+            }
+        }).strength(0.5));
 
-        // Use imported d3 module instead of require
-        // const d3 = (window as any).d3 || require('d3-force'); 
-
+        // 增加电荷力防止重叠
+        graphRef.current.d3Force('charge').strength(-150);
     }
   }, []);
 
@@ -69,8 +112,8 @@ const StrategicPixiGraph = () => {
   // Let's try to set `fy` (Fixed Y) for specific nodes to enforce layers strictly!
   // This is supported by d3-force natively.
   useEffect(() => {
-      if (data.nodes.length > 0) {
-          data.nodes.forEach((node: any) => {
+      if (filteredData.nodes.length > 0) {
+          filteredData.nodes.forEach((node: any) => {
               // Enforce "Strategic Compass" Layers
               // Self: Center
               if (node.type === 'Self') {
@@ -85,7 +128,7 @@ const StrategicPixiGraph = () => {
               }
           });
       }
-  }, [data]);
+  }, [filteredData]);
 
 
   // Update dimensions on resize
@@ -122,25 +165,50 @@ const StrategicPixiGraph = () => {
 
   // Custom Node Rendering
   const paintNode = useCallback((node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const style = NODE_STYLES[node.type] || NODE_STYLES.Concept;
-    const label = node.label;
-    const fontSize = 12 / globalScale;
-    const radius = 5; // Base radius
+    let style = { ... (NODE_STYLES[node.type] || NODE_STYLES.Concept) };
+    const label = node.name || node.label;
+    const isHovered = hoverNode?.id === node.id;
+    
+    // [Strategic Brain] 能量建模可视化 (社交觉醒)
+    if (node.type === 'Person' && node.energy_impact !== undefined) {
+        if (node.energy_impact > 0) {
+            // 赋能型：更亮，带金色边框
+            style.color = '#FFD700'; // Gold
+            style.borderColor = '#B8860B';
+        } else if (node.energy_impact < 0) {
+            // 消耗型：灰色，带深红边框
+            style.color = '#757575'; 
+            style.borderColor = '#B71C1C';
+        }
+    }
 
-    // 1. Draw Shadow/Glow
-    ctx.shadowColor = 'rgba(0,0,0,0.2)';
-    ctx.shadowBlur = 4;
-    ctx.shadowOffsetX = 1;
-    ctx.shadowOffsetY = 1;
+    // 1. Level of Detail (LOD) - 极端缩小时只画简单的圆点
+    if (globalScale < 0.4 && !isHovered) {
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, 3, 0, 2 * Math.PI, false);
+        ctx.fillStyle = style.color;
+        ctx.fill();
+        return;
+    }
 
-    // 2. Draw Circle
+    const radius = isHovered ? 7 : 5;
+
+    // 2. Draw Shadow/Glow (只在悬停或中等缩放以上绘制，且减少模糊半径)
+    if (globalScale > 1.2 || isHovered) {
+        ctx.shadowColor = 'rgba(0,0,0,0.2)';
+        ctx.shadowBlur = 5 / globalScale;
+        ctx.shadowOffsetX = 1 / globalScale;
+        ctx.shadowOffsetY = 1 / globalScale;
+    }
+
+    // 3. Draw Circle
     ctx.beginPath();
     ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
     ctx.fillStyle = style.color;
     ctx.fill();
 
-    // 3. Draw Border
-    ctx.lineWidth = 1.5 / globalScale;
+    // 4. Draw Border
+    ctx.lineWidth = (isHovered ? 2.5 : 1.5) / globalScale;
     ctx.strokeStyle = style.borderColor;
     ctx.stroke();
 
@@ -148,25 +216,25 @@ const StrategicPixiGraph = () => {
     ctx.shadowColor = 'transparent';
     ctx.shadowBlur = 0;
 
-    // 4. Draw Label
-    // LOD: Only show label if scale is sufficient or it's a high-level node
-    const isImportant = (node.level || 10) <= 2;
-    const isHovered = hoverNode && hoverNode.id === node.id;
-    
-    if (isImportant || globalScale > 1.2 || isHovered) {
-      ctx.font = `600 ${3 + fontSize}px Sans-Serif`; // Fixed base size + scale adjustment
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      
-      // Text Background (for readability)
-      // const textWidth = ctx.measureText(label).width;
-      // ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-      // ctx.fillRect(node.x - textWidth / 2 - 2, node.y + radius + 2, textWidth + 4, fontSize + 4);
-
-      ctx.fillStyle = themeColors.text;
-      ctx.fillText(label, node.x, node.y + radius + 2);
+    // 5. Draw Label (LOD - 缩放较小时不绘制文字)
+    if (globalScale > 0.7 || isHovered) {
+        const fontSize = (isHovered ? 14 : 12) / globalScale;
+        ctx.font = `${isHovered ? 'bold' : 'normal'} ${fontSize}px "Inter", system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = themeColors.text;
+        
+        // 绘制文字背景以便阅读
+        if (isHovered) {
+            const textWidth = ctx.measureText(label).width;
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(node.x - textWidth/2 - 2, node.y + radius + 2, textWidth + 4, fontSize + 2);
+            ctx.fillStyle = '#ffffff';
+        }
+        
+        ctx.fillText(label, node.x, node.y + radius + 4);
     }
-  }, [themeColors, hoverNode]);
+  }, [hoverNode, themeColors]);
 
   const handleNodeHover = (node: any, prevNode: any) => {
     setHoverNode(node || null);
@@ -201,23 +269,51 @@ const StrategicPixiGraph = () => {
         ref={graphRef}
         width={dimensions.width}
         height={dimensions.height}
-        graphData={data}
+        graphData={filteredData}
         nodeLabel={() => ''} // Disable default browser tooltip, use custom overlay
         nodeCanvasObject={paintNode}
         nodeCanvasObjectMode={() => 'replace'} // We draw everything
         linkColor={() => themeColors.grid}
-        linkWidth={1}
-        linkDirectionalParticles={2}
-        linkDirectionalParticleWidth={2}
+        linkWidth={(link: any) => {
+            // LOD: 缩小时线变细
+            return 1;
+        }}
+        linkDirectionalParticles={(link: any) => {
+            // LOD: 缩小时不显示粒子
+            return 2;
+        }}
+        linkDirectionalParticleWidth={(link: any) => {
+            return 2;
+        }}
         linkDirectionalParticleSpeed={0.005}
         backgroundColor={themeColors.background}
         onNodeHover={handleNodeHover}
         onNodeClick={(node) => {
-            // Focus on node
+            // 1. Focus on node
             if (graphRef.current) {
                 graphRef.current.centerAt(node.x, node.y, 1000);
                 graphRef.current.zoom(4, 2000);
             }
+            // 2. Trigger external callback
+            if (onNodeClick) {
+                onNodeClick(node as StrategicNode);
+            }
+        }}
+        onNodeDragEnd={async (node) => {
+          if (viewType === 'staging' && onMergeNodes) {
+            // Find if dropped onto another node
+            const { nodes } = filteredData;
+            const targetNode: any = nodes.find((n: any) => {
+              if (n.id === node.id) return false;
+              const dist = Math.sqrt(Math.pow(n.x - (node as any).x, 2) + Math.pow(n.y - (node as any).y, 2));
+              return dist < 15; // Threshold for merging
+            });
+
+            if (targetNode && window.confirm(`是否将节点 "${node.label}" 合并到 "${targetNode.label}"?`)) {
+              await onMergeNodes(node.id, targetNode.id);
+              refresh(); // 合并后刷新数据
+            }
+          }
         }}
         // Physics settings
         cooldownTicks={100}

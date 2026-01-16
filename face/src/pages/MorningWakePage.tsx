@@ -95,7 +95,7 @@ export default function MorningWakePage() {
         setTimeout(() => setShowAIMessage(true), 500);
       }
     } else {
-      navigate('/dashboard');
+      navigate('/');
     }
   };
 

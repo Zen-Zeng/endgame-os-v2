@@ -7,8 +7,10 @@ import json
 import asyncio
 import os
 from typing import List, Dict, Any, Tuple, Optional
+from openai import AsyncOpenAI
 from google import genai
 from app.core.config import MODEL_CONFIG
+from app.core.utils import extract_json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,6 +45,19 @@ class NeuralProcessor:
         else:
             self.client = None
             logger.warning("未配置 Gemini API Key，图谱提取功能将不可用")
+
+        # 初始化 DeepSeek
+        self.deepseek_api_key = MODEL_CONFIG.get("deepseek_api_key")
+        self.deepseek_base_url = MODEL_CONFIG.get("deepseek_base_url")
+        if self.deepseek_api_key:
+            self.deepseek_client = AsyncOpenAI(
+                api_key=self.deepseek_api_key, 
+                base_url=self.deepseek_base_url
+            )
+            logger.info("DeepSeek 处理器就绪")
+        else:
+            self.deepseek_client = None
+            logger.warning("未配置 DeepSeek API Key")
 
     def _ensure_embedding_loaded(self):
         """确保向量化模型已加载（延迟加载）"""
@@ -137,10 +152,54 @@ class NeuralProcessor:
             return [[0.0] * 1024 for _ in texts]
 
     # --- 核心接口 2: 结构化关系提取 (左脑) ---
-    async def extract_structured_memory(self, text: str, user_id: str = "default_user", chapter_start_date: str = None) -> Dict[str, Any]:
+    async def extract_structured_memory_deepseek(self, text: str, vision_context: str = "") -> Dict[str, Any]:
+        """
+        [DeepSeek Blast Furnace]
+        使用 DeepSeek V3/R1 提取结构化记忆。
+        """
+        if not self.deepseek_client:
+            logger.warning("DeepSeek client not initialized, falling back to empty result")
+            return {}
+
+        system_prompt = f"""你不是聊天机器人，你是数据结构化引擎。
+结合用户的【终局愿景】，将以下对话重构为 JSON。
+只保留 Vision, Goal, Project, Task, Person。
+丢弃所有闲聊、无关 Concept、临时信息。
+
+【终局愿景上下文】:
+{vision_context}
+
+【输出格式】:
+{{
+  "nodes": [
+    {{ "id": "uuid", "type": "Goal", "name": "...", "content": "..." }},
+    {{ "id": "uuid", "type": "Project", "name": "...", "content": "..." }}
+  ],
+  "edges": [
+    {{ "source": "uuid_from", "target": "uuid_to", "relation": "OWNS/ACHIEVED_BY/HAS_TASK" }}
+  ]
+}}
+"""
+        try:
+            response = await self.deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"请处理以下文本块:\n\n{text}"}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1
+            )
+            content = response.choices[0].message.content
+            return extract_json(content)
+        except Exception as e:
+            logger.error(f"DeepSeek extraction failed: {e}")
+            return {}
+
+    async def extract_structured_memory(self, text: str, user_id: str = "default_user", strategic_context: str = "") -> Dict[str, Any]:
         """
         [Strategic Brain Upgrade]
-        使用 Gemini 2.0 Flash 提取结构化记忆，注入主体意识和五层战略结构。
+        使用 Gemini 2.0 Flash 提取结构化记忆，注入主体意识、五层战略结构和社交能量建模。
         """
         if not self.client:
             return {"entities": [], "relations": []}
@@ -150,41 +209,48 @@ class NeuralProcessor:
         你的核心任务是：从文本中提取知识，并将其归位到以【Self ({user_id})】为中心的五层战略图谱中。
 
         ### 1. 核心原则：主体性 (Subjectivity)
-        - **绝对主体**：文本中的“我”、“我们”、“本人”等第一人称表述，**必须**直接归属到 ID 为 `{user_id}` 的 Self 节点，**严禁**创建名为 "User" 或 "Me" 的新节点。
-        - **外部识别**：只有当提到具体的第三方姓名（如“王总”、“Alice”）时，才创建 `Person` 节点。
+        - **绝对主体**：文本中的“我”、“我们”、“本人”等第一人称表述，**必须**直接归属到 ID 为 `{user_id}` 的 Self 节点。
+        - **归位 (Strategic Positioning)**：新提取的 Task 必须尽可能关联到已有的 Project，Project 必须关联到 Goal。
+        - **人优先于事**：识别文本中提到的人物，分析其对用户的情绪能量影响。
 
         ### 2. 节点分类体系 (Node Ontology)
-        请严格将提取的信息分类为以下 6 种类型：
-        - **Vision**: 5年终局愿景（通常涉及人生方向、最终状态）。
-        - **Goal**: 战略目标（OKR中的O，通常有明确的时间边界）。
-        - **Project**: 执行项目（为了实现目标而做的一系列事情）。
-        - **Task**: 原子任务（具体的行动项，TODO）。
-        - **Person**: 外部联系人（协作者、朋友、客户）。
-        - **Concept**: 认知/信念（方法论、知识点、价值观）。
+        请严格将提取的信息分类为以下类型：
+        - **Vision**: 5年终局愿景。
+        - **Goal**: 战略目标（OKR中的O）。
+        - **Project**: 执行项目。
+        - **Task**: 原子任务。
+        - **Person**: 外部联系人。需要提取：
+            - `energy_impact`: 能量影响 (-5 到 +5，负数表示消耗，正数表示赋能)。
+            - `alignment_score`: 愿景对齐度 (0.0 到 1.0)。
+        - **Concept**: 认知/信念。
 
         ### 3. 关系提取规则 (Predicates)
         - Self -> **OWNS** -> Vision
         - Vision -> **DECOMPOSES_TO** -> Goal
         - Goal -> **ACHIEVED_BY** -> Project
         - Project -> **CONSISTS_OF** -> Task
-        - Self -> **EXECUTES** -> Task/Project
         - Self -> **KNOWS** -> Person
-        - Person -> **SUPPORTS** -> Project
-        - Self -> **BELIEVES** -> Concept
+        - Person -> **SUPPORTS** -> Project (当某人参与某事时)
+        - Person -> **INFLUENCES** -> Self (当提到对某人的主观感受时)
 
-        ### 4. 输出要求 (JSON)
+        ### 4. 战略上下文 (已有节点，请尝试将新信息挂载到这些节点下):
+        {strategic_context}
+
+        ### 5. 输出要求 (JSON)
         {{
           "entities": [
             {{
-              "name": "实体名称 (Self节点请直接填 '{user_id}')",
+              "name": "实体名称",
               "type": "Vision|Goal|Project|Task|Person|Concept",
               "content": "核心描述",
-              "status": "pending",  // 默认为待确认
+              "status": "pending",
+              "energy_impact": 0, // 仅对 Person 有效
+              "alignment_score": 0.5, // 仅对 Person 有效
               "dossier": {{ ...详细属性... }}
             }}
           ],
           "relations": [
-            {{"source": "主体ID", "relation": "谓语", "target": "客体ID"}}
+            {{"source": "主体名称/ID", "relation": "谓语", "target": "客体名称/ID"}}
           ]
         }}
 
@@ -234,7 +300,25 @@ class NeuralProcessor:
 
     def get_embedding_dimension(self) -> int:
         """获取向量维度"""
-        return 384 # all-MiniLM-L6-v2 的标准维度
+        # all-MiniLM-L6-v2 的标准维度是 384
+        # 但我们为了兼容性和未来扩展，可能会使用 768 或 1536
+        return 384
+
+    def compute_similarity(self, vec_a: List[float], vec_b: List[float]) -> float:
+        """计算余弦相似度"""
+        if not vec_a or not vec_b: return 0.0
+        
+        import numpy as np
+        a = np.array(vec_a)
+        b = np.array(vec_b)
+        
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
+        
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+            
+        return float(np.dot(a, b) / (norm_a * norm_b))
 
 # 单例模式
 _processor_instance = None

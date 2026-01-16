@@ -10,6 +10,7 @@ const API_BASE = '/api/v1';
 
 interface RequestOptions extends RequestInit {
   token?: string;
+  params?: Record<string, string | number | boolean | undefined>;
 }
 
 class ApiClient {
@@ -81,7 +82,21 @@ class ApiClient {
   }
 
   async request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-    const url = `${this.baseUrl}${endpoint}`;
+    let url = `${this.baseUrl}${endpoint}`;
+    
+    // 处理查询参数
+    if (options.params) {
+      const searchParams = new URLSearchParams();
+      Object.entries(options.params).forEach(([key, value]) => {
+        if (value !== undefined) {
+          searchParams.append(key, String(value));
+        }
+      });
+      const queryString = searchParams.toString();
+      if (queryString) {
+        url += (url.includes('?') ? '&' : '?') + queryString;
+      }
+    }
     
     // 权限校验拦截 (排除登录和注册接口)
     const isPublic = endpoint.includes('/auth/login') || endpoint.includes('/auth/register');

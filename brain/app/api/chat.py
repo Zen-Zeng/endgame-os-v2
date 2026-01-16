@@ -464,6 +464,23 @@ async def delete_conversation(
     
     return {"message": "会话已删除"}
 
+def clear_user_chat_history(user_id: str):
+    """清空用户的所有对话历史"""
+    conv_ids_to_delete = [
+        cid for cid, conv in _conversations_db.items() 
+        if conv.get("user_id") == user_id
+    ]
+    
+    for cid in conv_ids_to_delete:
+        if cid in _conversations_db:
+            del _conversations_db[cid]
+        if cid in _messages_db:
+            del _messages_db[cid]
+            
+    _save_data(CONVERSATIONS_FILE, _conversations_db)
+    _save_data(MESSAGES_FILE, _messages_db)
+    return True
+
 
 @router.post("/conversations/{conversation_id}/archive")
 async def archive_conversation(

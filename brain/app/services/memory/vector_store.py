@@ -45,6 +45,15 @@ class VectorStore:
                 embedding_function=None
             )
             
+            # Phase 1: 愿景锚点向量
+            # 这个集合只存储一个向量：Vision Anchor
+            # 用于快速计算任何节点与愿景的余弦相似度
+            self.vision_anchor_collection = self.client.get_or_create_collection(
+                name="endgame_vision_anchor",
+                metadata={"hnsw:space": "cosine"},
+                embedding_function=None
+            )
+            
             # 自动维度检测与重置
             self._check_and_reset_if_needed()
             
@@ -73,6 +82,7 @@ class VectorStore:
             self.client.delete_collection("endgame_concepts")
             self.client.delete_collection("endgame_experiences")
             self.client.delete_collection("endgame_vision")
+            self.client.delete_collection("endgame_vision_anchor")
             self._initialize_client()
         except Exception: pass
 
@@ -175,3 +185,28 @@ class VectorStore:
             results = self.vision_collection.query(query_embeddings=[query_vector], n_results=n_results)
             return results['documents'][0] if results['documents'] else []
         except Exception: return []
+
+    def update_vision_anchor(self, vector: List[float]):
+        """更新愿景锚点向量 (Single Truth Source)"""
+        try:
+            # 始终只保留 ID='anchor'
+            # 如果存在则覆盖
+            self.vision_anchor_collection.upsert(
+                ids=["anchor"],
+                embeddings=[vector],
+                metadatas=[{"type": "vision_anchor"}],
+                documents=["VISION_ANCHOR"]
+            )
+            logger.info("Vision Anchor updated successfully.")
+        except Exception as e:
+            logger.error(f"Failed to update Vision Anchor: {e}")
+
+    def get_vision_anchor(self) -> Optional[List[float]]:
+        """获取当前愿景锚点向量"""
+        try:
+            result = self.vision_anchor_collection.get(ids=["anchor"], include=["embeddings"])
+            if result and result['embeddings']:
+                return result['embeddings'][0]
+            return None
+        except Exception:
+            return None

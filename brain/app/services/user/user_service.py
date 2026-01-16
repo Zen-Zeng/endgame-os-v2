@@ -6,13 +6,19 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+from ...core.config import DATA_DIR
+
 class UserService:
     """
     用户数据持久化服务
     使用 JSON 文件存储用户信息、愿景和人格配置
     """
-    def __init__(self, storage_path: str = "data/users.json"):
-        self.storage_path = Path(storage_path)
+    def __init__(self, storage_path: Optional[str] = None):
+        if storage_path:
+            self.storage_path = Path(storage_path)
+        else:
+            self.storage_path = DATA_DIR / "users.json"
+        
         # 确保目录存在
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         self._data: Dict[str, Any] = self._load_data()
@@ -47,6 +53,22 @@ class UserService:
 
     def get_all_users(self) -> Dict[str, Dict[str, Any]]:
         return self._data
+
+    def reset_user_data(self, user_id: str):
+        """重置用户基础数据（人格、愿景等）"""
+        if user_id in self._data:
+            # 保留基本信息，重置配置
+            base_info = {
+                "id": self._data[user_id].get("id"),
+                "email": self._data[user_id].get("email"),
+                "name": self._data[user_id].get("name"),
+                "created_at": self._data[user_id].get("created_at"),
+                "last_active_at": self._data[user_id].get("last_active_at"),
+            }
+            self._data[user_id] = base_info
+            self.save()
+            return True
+        return False
 
 # 单例模式
 user_service = UserService()

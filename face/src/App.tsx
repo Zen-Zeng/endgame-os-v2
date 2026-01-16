@@ -6,17 +6,9 @@ import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from './stores/useAuthStore';
 import { useOnboardingStore } from './stores/useOnboardingStore';
 
-// 布局
-import MainLayout from './components/layout/MainLayout';
-
 // 页面
 import LoginPage from './pages/LoginPage';
-import DashboardPage from './pages/DashboardPage';
-import ChatPage from './pages/ChatPage';
-import CalibrationPage from './pages/CalibrationPage';
-import GoalsPage from './pages/GoalsPage';
-import NeuralLinkPage from './pages/NeuralLinkPage';
-import MemoryPage from './pages/MemoryPage';
+import BicameralPage from './pages/BicameralPage';
 import MorningWakePage from './pages/MorningWakePage';
 
 // 引导页面
@@ -31,12 +23,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[var(--color-bg-dark)]">
+      <div className="min-h-screen flex items-center justify-center bg-[var(--md-sys-color-surface)]">
         <div className="text-center">
-          <div className="w-12 h-12 rounded-xl bg-[var(--color-primary)] flex items-center justify-center mx-auto mb-4 animate-pulse">
-            <span className="text-white font-bold text-xl">E</span>
+          <div className="w-12 h-12 rounded-xl bg-[var(--md-sys-color-primary)] flex items-center justify-center mx-auto mb-4 animate-pulse">
+            <span className="text-[var(--md-sys-color-on-primary)] font-bold text-xl">E</span>
           </div>
-          <p className="text-[var(--color-text-secondary)]">加载中...</p>
+          <p className="text-[var(--md-sys-color-on-surface-variant)]">加载中...</p>
         </div>
       </div>
     );
@@ -62,12 +54,12 @@ function OnboardingRoute({ children }: { children: React.ReactNode }) {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[var(--color-bg-dark)]">
+      <div className="min-h-screen flex items-center justify-center bg-[var(--md-sys-color-surface)]">
         <div className="text-center">
-          <div className="w-12 h-12 rounded-xl bg-[var(--color-primary)] flex items-center justify-center mx-auto mb-4 animate-pulse">
-            <span className="text-white font-bold text-xl">E</span>
+          <div className="w-12 h-12 rounded-xl bg-[var(--md-sys-color-primary)] flex items-center justify-center mx-auto mb-4 animate-pulse">
+            <span className="text-[var(--md-sys-color-on-primary)] font-bold text-xl">E</span>
           </div>
-          <p className="text-[var(--color-text-secondary)]">加载中...</p>
+          <p className="text-[var(--md-sys-color-on-surface-variant)]">加载中...</p>
         </div>
       </div>
     );
@@ -79,7 +71,7 @@ function OnboardingRoute({ children }: { children: React.ReactNode }) {
 
   // 如果已完成引导，重定向到主页
   if (isOnboardingComplete) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to="/" replace />;
   }
 
   return <>{children}</>;
@@ -96,7 +88,7 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
     if (!isOnboardingComplete) {
       return <Navigate to="/onboarding/persona" replace />;
     }
-    const from = (location.state as { from?: Location })?.from?.pathname || '/dashboard';
+    const from = (location.state as { from?: Location })?.from?.pathname || '/';
     return <Navigate to={from} replace />;
   }
 
@@ -141,27 +133,34 @@ export default function App() {
         }
       />
 
-      {/* 受保护路由 */}
+      {/* 受保护路由 - 一脑一屏架构 */}
       <Route
         path="/"
         element={
           <ProtectedRoute>
-            <MainLayout />
+            <BicameralPage />
           </ProtectedRoute>
         }
-      >
-        <Route index element={<Navigate to="/dashboard" replace />} />
-        <Route path="dashboard" element={<DashboardPage />} />
-        <Route path="morning" element={<MorningWakePage />} />
-        <Route path="chat" element={<ChatPage />} />
-        <Route path="calibration" element={<CalibrationPage />} />
-        <Route path="goals" element={<GoalsPage />} />
-        <Route path="neural-link" element={<NeuralLinkPage />} />
-        <Route path="memory-map" element={<MemoryPage />} />
-      </Route>
+      />
+
+      {/* 设置页面 */}
+      <Route
+        path="/settings"
+        element={<Navigate to="/" replace />}
+      />
+
+      {/* 晨间启动流程 (独立页面，特殊流程) */}
+      <Route
+        path="/morning"
+        element={
+          <ProtectedRoute>
+            <MorningWakePage />
+          </ProtectedRoute>
+        }
+      />
 
       {/* 404 重定向 */}
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

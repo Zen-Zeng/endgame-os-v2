@@ -118,6 +118,29 @@ class DatabaseManager:
             logger.error(f"Get H3 History Failed: {e}")
             return []
 
+    def clear_h3_data(self, user_id: str):
+        """清空用户的 H3 能量和校准记录"""
+        try:
+            with self._get_conn() as conn:
+                conn.execute("DELETE FROM h3_energy WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM h3_calibrations WHERE user_id = ?", (user_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Clear H3 Data Failed: {e}")
+            return False
+
+    def clear_persona_config(self, user_id: str):
+        """清空用户的人格配置"""
+        try:
+            with self._get_conn() as conn:
+                conn.execute("DELETE FROM persona_configs WHERE user_id = ?", (user_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Clear Persona Config Failed: {e}")
+            return False
+
     # --- H3 Calibrations ---
     def save_h3_calibration(self, calibration_data: Dict[str, Any]):
         try:

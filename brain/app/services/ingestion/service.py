@@ -3,6 +3,7 @@ from pathlib import Path
 import logging
 import asyncio
 import uuid
+import json
 from datetime import datetime
 
 from app.services.memory.memory_service import get_memory_service
@@ -52,19 +53,177 @@ class IngestionService:
             # 文件解析 (CPU 密集型，放入线程池)
             chunks = await asyncio.to_thread(self.file_processor.parse_file, file_path)
             
-            # 1. 向量化 (Vectorization)
-            result = await self._process_vector_async(chunks, metadata, progress_callback)
-            
-            # 2. 图谱提取 (Graph Extraction)
+            # 新流程: 上传 -> 分块 -> DeepSeek结构化 -> 向量化 -> 图谱化
+            # 直接返回给后台任务处理
             return {
                 "success": True, 
-                "message": "向量化完成，准备进行图谱提取",
+                "message": "文件解析完成，准备进行DeepSeek结构化处理",
                 "chunks": len(chunks),
-                "graph_task_args": (chunks, result['ids'], result['embeddings'], metadata)
+                "deepseek_task_args": (chunks, metadata)
             }
         except Exception as e:
             logger.error(f"Ingest Error: {e}")
             return {'success': False, 'error': str(e)}
+
+    async def process_deepseek_pipeline(self, chunks: List[str], metadata: Dict[str, Any], progress_callback=None):
+        """
+        [DeepSeek Pipeline]
+        分块 -> 结构化 -> 向量化 -> 图谱化
+        """
+        from app.core.config import ENDGAME_VISION # Lazy import to avoid circular dependency
+        
+        total = len(chunks)
+        logger.info(f"开始 DeepSeek 流水线，总计 {total} 个切片")
+        user_id = metadata.get("user_id", "default_user")
+        vision_context = ENDGAME_VISION
+
+        # 1. 结构化 (DeepSeek)
+        structured_results = []
+        for i, chunk in enumerate(chunks):
+            if progress_callback:
+                progress_callback(30 + int((i / total) * 30), f"DeepSeek 正在结构化切片 {i+1}/{total}...")
+            logger.info(f"DeepSeek 正在处理切片 {i+1}/{total}...")
+            res = await self.memory_service.neural_processor.extract_structured_memory_deepseek(chunk, vision_context)
+            if res:
+                structured_results.append(res)
+        
+        # 2. 准备数据
+        if progress_callback: progress_callback(60, "正在整理结构化数据...")
+        all_nodes = []
+        all_edges = []
+        vectors_to_add = [] # (id, text, metadata)
+        
+        # ID 映射表 (DeepSeek ID -> Stable ID)
+        id_map = {}
+        
+        # 处理结构化数据
+        for res in structured_results:
+            nodes = res.get("nodes", [])
+            edges = res.get("edges", [])
+            
+            # 第一遍：生成 Stable IDs
+            for node in nodes:
+                original_id = node.get("id")
+                name = node.get("name", "Unknown")
+                node_type = node.get("type", "Concept")
+                
+                # [Strategic Brain] 强一致性 ID 归一化: Vision 和 Self 节点使用固定 ID
+                if node_type == "Vision":
+                    stable_id = f"vision_{user_id}"
+                elif node_type == "Self":
+                    stable_id = user_id
+                else:
+                    # 其他节点使用 GraphStore 的确定性 ID 生成逻辑
+                    stable_id = self.memory_service.graph_store._get_stable_id(name)
+                
+                if original_id:
+                    id_map[original_id] = stable_id
+                
+                # 更新 Node ID
+                node["id"] = stable_id
+                
+                # 添加到图谱待写入列表
+                all_nodes.append({
+                    "id": stable_id,
+                    "user_id": user_id,
+                    "type": node_type,
+                    "name": name,
+                    "content": node.get("content", ""),
+                    "attributes": {}
+                })
+                
+                # 筛选需要向量化的节点 (Goal, Project)
+                if node.get("type") in ["Goal", "Project"]:
+                    vectors_to_add.append({
+                        "id": stable_id,
+                        "text": node.get("content") or name,
+                        "metadata": {"name": name, "type": node.get("type"), "user_id": user_id}
+                    })
+            
+            # 第二遍：更新 Edges 的 Source/Target
+            for edge in edges:
+                src = edge.get("source")
+                tgt = edge.get("target")
+                
+                # 尝试映射，如果映射失败保留原值
+                final_src = id_map.get(src, src)
+                final_tgt = id_map.get(tgt, tgt)
+                
+                all_edges.append({
+                    "source": final_src,
+                    "target": final_tgt,
+                    "relation": edge["relation"],
+                    "user_id": user_id
+                })
+
+        # 3. 向量化 & 存储向量
+        # A. 节点向量化
+        if vectors_to_add:
+            if progress_callback: progress_callback(70, f"正在向量化 {len(vectors_to_add)} 个关键节点...")
+            logger.info(f"正在向量化 {len(vectors_to_add)} 个关键节点...")
+            texts = [v["text"] for v in vectors_to_add]
+            ids = [v["id"] for v in vectors_to_add]
+            metadatas = [v["metadata"] for v in vectors_to_add]
+            
+            embeddings = await asyncio.to_thread(
+                self.memory_service.neural_processor.embed_batch, 
+                texts
+            )
+            
+            await asyncio.to_thread(
+                self.memory_service.vector_store.add_documents,
+                texts, metadatas, ids, embeddings
+            )
+
+        # B. 原始切片向量化 (保持全文检索能力)
+        if chunks:
+            if progress_callback: progress_callback(80, "正在向量化原始文本切片...")
+            logger.info("正在向量化原始切片...")
+            chunk_embeddings = await asyncio.to_thread(
+                self.memory_service.neural_processor.embed_batch,
+                chunks
+            )
+            chunk_ids = [f"chunk_{uuid.uuid4().hex[:8]}" for _ in chunks]
+            chunk_metadatas = [metadata] * len(chunks)
+            
+            await asyncio.to_thread(
+                self.memory_service.vector_store.add_documents,
+                chunks, chunk_metadatas, chunk_ids, chunk_embeddings
+            )
+
+        # 4. 图谱存储 (Nodes & Edges)
+        if progress_callback: progress_callback(90, f"正在写入图谱: {len(all_nodes)} 节点, {len(all_edges)} 关系...")
+        logger.info(f"正在写入图谱: {len(all_nodes)} Nodes, {len(all_edges)} Edges")
+        try:
+            with self.memory_service.graph_store._get_conn() as conn:
+                # 预设对齐分：Vision/Self 节点设为 1.0，其他默认为 0.5 (中性对齐，防止滑块拉一点就全消失)
+                db_nodes = []
+                for n in all_nodes:
+                    score = 0.5
+                    if n["type"] in ["Vision", "Self"]:
+                        score = 1.0
+                    
+                    db_nodes.append((
+                        n["id"], n["user_id"], n["type"], n["name"], 
+                        n["content"], json.dumps(n["attributes"]), score
+                    ))
+
+                conn.executemany("""
+                    INSERT OR REPLACE INTO nodes (id, user_id, type, name, content, attributes, alignment_score)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, db_nodes)
+            
+                db_edges = [(e["source"], e["target"], e["relation"], e["user_id"]) for e in all_edges]
+                conn.executemany("""
+                    INSERT OR IGNORE INTO edges (source, target, relation, user_id)
+                    VALUES (?, ?, ?, ?)
+                """, db_edges)
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Graph DB Write Failed: {e}")
+
+        if progress_callback: progress_callback(100, "DeepSeek 流水线处理完成")
+        logger.info("DeepSeek 流水线完成")
 
     async def _process_vector_async(self, chunks: List[str], metadata: Dict[str, Any], progress_callback=None):
         """异步向量化处理"""

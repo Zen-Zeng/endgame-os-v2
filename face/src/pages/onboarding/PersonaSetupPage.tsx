@@ -5,13 +5,11 @@
 import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  User,
+  User as UserIcon,
   Sparkles,
   FileText,
-  FileJson,
   Upload,
   Brain,
-  Target,
   ArrowRight,
   ArrowLeft,
   X,
@@ -55,24 +53,27 @@ const personalityPresets = [
   },
 ];
 
-export default function PersonaSetupPage() {
+interface PersonaSetupPageProps {
+  mode?: 'onboarding' | 'settings';
+}
+
+export default function PersonaSetupPage({ mode = 'onboarding' }: PersonaSetupPageProps) {
   const navigate = useNavigate();
   const { user } = useAuthStore();
   const { setPersonaConfig, nextStep } = useOnboardingStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState(1);
-  const [isUploading, setIsUploading] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<Array<{ id: string; name: string; status: 'uploading' | 'processing' | 'done' | 'error' }>>([]);
   
   const [formData, setFormData] = useState({
     nickname: user?.name || '',
-    aiName: 'The Architect',
+    aiName: user?.persona?.name || 'The Architect',
     selectedPersonality: 'mentor',
-    customPersonality: '',
-    instructions: '',
-    vision: '',
-    goals: [''],
+    customPersonality: user?.persona?.system_prompt_template || '',
+    instructions: user?.persona?.system_prompt_template || '',
+    vision: user?.vision?.description || '',
+    goals: user?.vision?.key_milestones || [''],
   });
 
   const totalSteps = 4;
@@ -124,32 +125,6 @@ export default function PersonaSetupPage() {
     }
   };
 
-  const removeFile = (fileId: string) => {
-    setUploadedFiles(prev => prev.filter(f => f.id !== fileId));
-  };
-
-  const addGoal = () => {
-    setFormData({
-      ...formData,
-      goals: [...formData.goals, ''],
-    });
-  };
-
-  const updateGoal = (index: number, value: string) => {
-    const newGoals = [...formData.goals];
-    newGoals[index] = value;
-    setFormData({ ...formData, goals: newGoals });
-  };
-
-  const removeGoal = (index: number) => {
-    if (formData.goals.length > 1) {
-      setFormData({
-        ...formData,
-        goals: formData.goals.filter((_, i) => i !== index),
-      });
-    }
-  };
-
   const handleNext = async () => {
     if (step < totalSteps) {
       setStep(step + 1);
@@ -164,73 +139,58 @@ export default function PersonaSetupPage() {
           : selectedPreset?.prompt || '',
         instructions: formData.instructions,
         knowledgeBase: [],
-        memoryFiles: uploadedFiles.filter(f => f.status === 'done').map(f => f.id),
+        memoryFiles: uploadedFiles.filter((f: any) => f.status === 'done').map((f: any) => f.id),
         vision: formData.vision,
-        goals: formData.goals.filter(g => g.trim()),
+        goals: formData.goals.filter((g: string) => g.trim()),
       };
       
       setPersonaConfig(config);
       
       // 同步到后端
       try {
-        // 1. 更新用户名称
-        await api.patch('/auth/me', {
-          name: formData.nickname,
-        });
-        
-        // 2. 更新用户愿景
-        await api.patch('/auth/me', {
-          vision: {
-            title: '我的5年愿景',
-            description: formData.vision,
-            core_values: [],
-            key_milestones: formData.goals.filter(g => g.trim()),
-          },
-        });
-        
-        // 3. 更新数字人格配置
-        // 将前端格式转换为后端格式
         const personaToneMap: Record<string, string> = {
           'mentor': 'mentor',
           'friend': 'partner',
           'coach': 'coach',
           'custom': 'mentor',
         };
-        
-        await api.put('/persona/current', {
-          name: formData.aiName,
-          tone: personaToneMap[formData.selectedPersonality] || 'mentor',
-          system_prompt_template: formData.instructions || undefined,
-          traits: selectedPreset?.desc ? [selectedPreset.desc] : [],
-        });
+
+        if (mode === 'settings') {
+          // 更新模式：调用 /persona/current
+          await api.put('/persona/current', {
+            name: formData.aiName,
+            tone: personaToneMap[formData.selectedPersonality] || 'mentor',
+            system_prompt_template: formData.instructions || undefined,
+            traits: selectedPreset?.desc ? [selectedPreset.desc] : [],
+          });
+        } else {
+          // 初始化模式
+          await api.post('/auth/initialize', {
+            name: formData.nickname,
+            vision: {
+              title: '我的5年愿景',
+              description: formData.vision,
+              core_values: [],
+              key_milestones: formData.goals.filter((g: string) => g.trim()),
+            },
+            persona: {
+              name: formData.aiName,
+              tone: personaToneMap[formData.selectedPersonality] || 'mentor',
+              system_prompt_template: formData.instructions || undefined,
+              traits: selectedPreset?.desc ? [selectedPreset.desc] : [],
+            }
+          });
+        }
       } catch (error) {
-        console.error('同步配置到后端失败:', error);
-        // 即使同步失败也继续引导流程
+        console.error('保存配置失败:', error);
       }
       
-      nextStep();
-      navigate('/onboarding/h3');
-    }
-  };
-
-  const handleBack = () => {
-    if (step > 1) {
-      setStep(step - 1);
-    }
-  };
-
-  const isStepValid = () => {
-    switch (step) {
-      case 1:
-        return formData.nickname.trim() && formData.aiName.trim();
-      case 2:
-        return formData.selectedPersonality !== 'custom' || formData.customPersonality.trim();
-      case 3:
-        return true; // 文件上传是可选的
-      case 4:
-        return formData.vision.trim();
-      default:
-        return false;
+      if (mode === 'settings') {
+        navigate('/');
+      } else {
+        nextStep();
+        navigate('/onboarding/h3');
+      }
     }
   };
 
@@ -246,12 +206,22 @@ export default function PersonaSetupPage() {
           <div className="w-10 h-10 rounded-xl bg-[var(--md-sys-color-primary)] flex items-center justify-center text-white">
             <Sparkles size={24} />
           </div>
-          <h1 className="text-2xl font-black tracking-tighter">人格设定</h1>
+          <h1 className="text-2xl font-black tracking-tighter">{mode === 'settings' ? '系统设置' : '人格设定'}</h1>
         </div>
+
+        {mode === 'settings' && (
+          <button 
+            onClick={() => navigate('/')}
+            className="p-2 rounded-full hover:bg-[var(--md-sys-color-surface-container-high)] transition-colors"
+            title="返回系统"
+          >
+            <X size={24} />
+          </button>
+        )}
         
         {/* 进度指示器 */}
         <div className="flex items-center gap-2">
-          {Array.from({ length: totalSteps }).map((_, i) => (
+          {Array.from({ length: totalSteps }).map((_, i: number) => (
             <div 
               key={i} 
               className={clsx(
@@ -278,7 +248,7 @@ export default function PersonaSetupPage() {
                 <div className="space-y-3">
                   <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">你的称呼</label>
                   <div className="relative">
-                    <User className="absolute left-5 top-1/2 -translate-y-1/2 opacity-30" size={20} />
+                    <UserIcon className="absolute left-5 top-1/2 -translate-y-1/2 opacity-30" size={20} />
                     <input
                       type="text"
                       className="w-full pl-14 pr-5 py-4 rounded-2xl bg-[var(--md-sys-color-surface-container-highest)] border border-transparent focus:border-[var(--md-sys-color-primary)] outline-none transition-all"
@@ -416,7 +386,7 @@ export default function PersonaSetupPage() {
                 <div className="space-y-3">
                   <label className="text-xs font-bold opacity-50 uppercase tracking-widest ml-1">当前具体目标</label>
                   <div className="space-y-3">
-                    {formData.goals.map((goal, index) => (
+                    {formData.goals.map((goal: string, index: number) => (
                       <div key={index} className="flex gap-2">
                         <input
                           type="text"
@@ -431,7 +401,7 @@ export default function PersonaSetupPage() {
                         />
                         {formData.goals.length > 1 && (
                           <button 
-                            onClick={() => setFormData({ ...formData, goals: formData.goals.filter((_, i) => i !== index) })}
+                            onClick={() => setFormData({ ...formData, goals: formData.goals.filter((_: string, i: number) => i !== index) })}
                             className="p-4 rounded-2xl hover:bg-[var(--md-sys-color-error-container)] hover:text-[var(--md-sys-color-on-error-container)] transition-colors opacity-30 hover:opacity-100"
                           >
                             <X size={20} />
@@ -468,7 +438,7 @@ export default function PersonaSetupPage() {
               onClick={handleNext}
               className="px-10 py-6 rounded-2xl shadow-xl shadow-[var(--md-sys-color-primary)]/20 font-black tracking-tighter"
             >
-              {step === totalSteps ? '开启系统' : '继续下一步'}
+              {step === totalSteps ? (mode === 'settings' ? '保存设置' : '开启系统') : '继续下一步'}
               <ArrowRight size={20} className="ml-2" />
             </Button>
           </div>

@@ -39,7 +39,8 @@ async def get_strategic_graph(user: User = Depends(require_user)):
     
     # 1. 获取所有节点和边
     try:
-        raw_data = graph.get_all_graph_data(user.id)
+        # 使用 strategic 视图模式，确保获取完整的执行层级节点 (Vision -> Action)
+        raw_data = graph.get_all_graph_data(user.id, view_type='strategic')
         nodes_map = {n['id']: n for n in raw_data.get('nodes', [])}
         links = raw_data.get('links', [])
     except Exception as e:
@@ -65,7 +66,7 @@ async def get_strategic_graph(user: User = Depends(require_user)):
     
     # 正向关系：Src 是 Parent，Tgt 是 Child
     FORWARD_RELATIONS = {
-        "OWNS", "DECOMPOSES_TO", "ACHIEVED_BY", "CONSISTS_OF", 
+        "OWNS", "DECOMPOSES_TO", "ACHIEVED_BY", "CONSISTS_OF", "HAS_GOAL", "HAS_PROJECT",
         "USES", "REFERENCES", "MENTIONS", "RELATED_TO", "HAS_RELATION", "DEFINES", "IMPROVES", "INCLUDES", "MANAGES", "COMMUNICATED_WITH"
     }
     # 反向关系：Src 是 Child，Tgt 是 Parent (需要反转)

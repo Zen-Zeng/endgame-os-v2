@@ -22,9 +22,6 @@ export const memoryApi = {
   // 训练文件
   trainFiles: (filenames: string[]) => api.post<{ task_id: string }>('/memory/train', { filenames }),
   
-  // 语义合并
-  consolidateMemory: () => api.post<{ task_id: string; message: string }>('/memory/consolidate'),
-  
   // 获取任务状态
   getTaskStatus: (taskId: string) => api.get<TaskStatus>(`/memory/tasks/${taskId}`),
   

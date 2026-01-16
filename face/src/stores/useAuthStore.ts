@@ -5,13 +5,32 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { api } from '../lib/api';
 
-interface User {
+export interface UserVision {
+  title: string;
+  description: string;
+  core_values: string[];
+  key_milestones: string[];
+}
+
+export interface PersonaConfig {
+  name: string;
+  tone: string;
+  proactive_level: number;
+  challenge_mode: boolean;
+  reflection_frequency: string;
+  system_prompt_template?: string;
+  traits: string[];
+}
+
+export interface User {
   id: string;
   email: string;
   name: string;
   avatar_url?: string;
   onboarding_completed: boolean;
   morning_protocol_enabled: boolean;
+  vision?: UserVision;
+  persona?: PersonaConfig;
 }
 
 interface AuthState {

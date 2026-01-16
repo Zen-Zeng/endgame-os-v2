@@ -219,12 +219,32 @@ export default function ChatInterface() {
           )}
         </div>
         
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-2 text-xs">
+            <span className="text-white/40 font-medium uppercase tracking-wider hidden sm:inline-block">Energy</span>
+            <div className="flex items-center space-x-1">
+              {[
+                { label: 'M', value: scores.mind, color: 'bg-blue-500' },
+                { label: 'B', value: scores.body, color: 'bg-green-500' },
+                { label: 'S', value: scores.spirit, color: 'bg-purple-500' },
+                { label: 'V', value: scores.vocation, color: 'bg-amber-500' },
+              ].map((item) => (
+                <div key={item.label} className="flex items-center space-x-1 px-1.5 py-0.5 rounded bg-white/5 border border-white/10 hover:bg-white/10 transition-colors cursor-help" title={`${item.label}: ${item.value}%`}>
+                  <span className={clsx("w-1.5 h-1.5 rounded-full", item.color)}></span>
+                  <span className="text-white/80 font-mono">{item.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          
+          <div className="w-px h-4 bg-white/10"></div>
+
           <Button 
             variant="text" 
             onClick={() => setShowMemoryPanel(!showMemoryPanel)}
-            className={clsx("p-1.5 h-10 w-10", showMemoryPanel && "bg-white/10")}
+            className={clsx("p-1.5 h-8 w-8 text-white/60 hover:text-white", showMemoryPanel && "bg-white/10 text-white")}
             icon={<Database className="w-4 h-4" />}
+            title="记忆图谱与知识库"
           >
           </Button>
         </div>

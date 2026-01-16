@@ -39,6 +39,11 @@ class MemoryService:
         self.vector_store.clear_all_data() # ChromaDB 目前全局清空，后续可优化
         self.graph_store.clear_all_data(user_id=user_id)
 
+    def clear_graph_memories(self, user_id: str):
+        """仅清空知识图谱节点和关系"""
+        self.graph_store.clear_graph_only(user_id=user_id)
+        # 也可以考虑是否清空向量库中的某些内容，但图谱节点主要在 graph_store
+
     def get_stats(self, user_id: str = "default_user") -> Dict[str, Any]:
         """获取综合统计信息"""
         vector_stats = self.vector_store.get_stats()
@@ -92,8 +97,13 @@ class MemoryService:
             embeddings=[embedding]
         )
         
-        # 3. 提取结构化记忆 (左脑) - [Strategic Brain] 注入 user_id
-        structured_data = await self.neural_processor.extract_structured_memory(combined_text, user_id=user_id)
+        # 3. 提取结构化记忆 (左脑) - [Strategic Brain] 注入战略上下文
+        strategic_context = self.graph_store.get_strategic_context(user_id)
+        structured_data = await self.neural_processor.extract_structured_memory(
+            combined_text, 
+            user_id=user_id,
+            strategic_context=strategic_context
+        )
         entities = structured_data.get("entities", [])
         relations = structured_data.get("relations", [])
 

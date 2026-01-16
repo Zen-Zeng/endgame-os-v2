@@ -285,7 +285,7 @@ export default function H3OnboardingPage() {
     await initializeFromOnboarding(h3Scores);
     
     completeOnboarding();
-    navigate('/dashboard');
+    navigate('/');
   };
 
   if (showResult) {

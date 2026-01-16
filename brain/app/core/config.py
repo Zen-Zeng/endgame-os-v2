@@ -62,7 +62,9 @@ MODEL_CONFIG = {
     # 优先使用本地模型，如果不存在则使用 Hugging Face Hub
     "embedding_model": str(LOCAL_EMBEDDING_PATH) if LOCAL_EMBEDDING_PATH.exists() else f"sentence-transformers/{EMBEDDING_MODEL_NAME}",
     "gemini_model": "gemini-2.0-flash", # 根据要求更新为 2.0 版本
-    "gemini_api_key": os.getenv("GOOGLE_API_KEY", "")
+    "gemini_api_key": os.getenv("GOOGLE_API_KEY", ""),
+    "deepseek_api_key": os.getenv("DEEPSEEK_API_KEY", ""),
+    "deepseek_base_url": "https://api.deepseek.com"
 }
 
 # Memory & Ingestion 配置
